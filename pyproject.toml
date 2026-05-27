@@ -1,0 +1,69 @@
+[project]
+name = "intelligent-document-processing"
+version = "0.1.0"
+description = "On-premise Intelligent Document Processing platform"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "paddleocr>=3.5.0",
+    "paddlepaddle>=3.3.1",
+    "psycopg2-binary==2.9.9",
+]
+
+[dependency-groups]
+base = [
+    "fastapi==0.115.12",
+    "uvicorn[standard]==0.34.0",
+    "httpx==0.28.1",
+    "boto3==1.37.38",
+    "pydantic==2.11.3",
+    "pydantic-settings==2.8.1",
+    "prometheus-client==0.21.1",
+    "python-multipart==0.0.20",
+    "orjson==3.10.16",
+    "tenacity==9.0.0",
+]
+temporal = [
+    { include-group = "base" },
+    "temporalio==1.10.0",
+]
+orchestrator = [
+    { include-group = "temporal" },
+]
+preprocess = [
+    { include-group = "base" },
+    "numpy==2.1.3",
+    "opencv-python-headless==4.11.0.86",
+    "pillow==11.1.0",
+]
+ocr = [
+    { include-group = "preprocess" },
+    "paddlepaddle>=3.0.0",
+    "paddleocr>=3.0.0",
+]
+layout = [
+    { include-group = "preprocess" },
+    "layoutparser[layoutmodels]==0.3.4",
+    "torch==2.5.1",
+    "torchvision==0.20.1",
+]
+extraction = [
+    { include-group = "base" },
+    "langchain==0.3.25",
+    "langchain-openai==0.3.17",
+]
+evaluation = [
+    { include-group = "base" },
+    "mlflow==2.22.0",
+]
+research = [
+    "datasets>=3.1.0",
+    "huggingface-hub>=0.36.2",
+    "polars>=1.8.2",
+]
+dev = [
+    "ruff==0.15.12",
+]
+
+[tool.uv]
+default-groups = []

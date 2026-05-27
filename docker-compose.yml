@@ -1,0 +1,426 @@
+name: idp-local-stack
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-idp}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-idp_password}
+      POSTGRES_DB: idp
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d idp"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks: [idp]
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks: [idp]
+
+  seaweedfs:
+    image: chrislusf/seaweedfs:4.25
+    entrypoint: weed
+    command: mini -dir=/data -master.volumeSizeLimitMB=64
+    environment:
+      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY:-${MINIO_ACCESS_KEY:-idpadmin}}
+      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:-${MINIO_SECRET_KEY:-idpsecret123}}
+      S3_BUCKET: ${RAW_BUCKET:-raw-documents},${PREPROCESSED_BUCKET:-preprocessed-documents},${OCR_BUCKET:-ocr-artifacts},${LAYOUT_BUCKET:-layout-artifacts},${EXTRACTION_BUCKET:-extraction-artifacts},${DELIVERY_BUCKET:-delivery-artifacts},${MLFLOW_BUCKET:-mlflow-artifacts}
+    ports:
+      - "8333:8333"
+      - "8888:8888"
+      - "9333:9333"
+      - "9340:9340"
+      - "23646:23646"
+    volumes:
+      - seaweedfs_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9333/cluster/status >/dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+    networks: [idp]
+
+  temporal:
+    image: temporalio/auto-setup:1.27.2
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB: postgres12
+      DB_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER:-idp}
+      POSTGRES_PWD: ${POSTGRES_PASSWORD:-idp_password}
+      POSTGRES_SEEDS: postgres
+      DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/development.yaml
+    volumes:
+      - ./infra/temporal/dynamicconfig:/etc/temporal/config/dynamicconfig
+    ports:
+      - "7233:7233"
+    restart: unless-stopped
+    networks: [idp]
+
+  temporal-ui:
+    image: temporalio/ui:2.37.0
+    depends_on:
+      - temporal
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
+    ports:
+      - "8088:8080"
+    restart: unless-stopped
+    networks: [idp]
+
+  ingestion-service:
+    build:
+      context: .
+      dockerfile: docker/python-service.Dockerfile
+      args:
+        UV_GROUP: temporal
+    command: uvicorn ingestion_service.app.main:app --host 0.0.0.0 --port 8000
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      temporal:
+        condition: service_started
+      seaweedfs:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks: [idp]
+
+  workflow-orchestrator:
+    build:
+      context: .
+      dockerfile: docker/python-service.Dockerfile
+      args:
+        UV_GROUP: orchestrator
+    command: python -m workflow_orchestrator.app.worker
+    env_file: .env
+    depends_on:
+      temporal:
+        condition: service_started
+      ingestion-service:
+        condition: service_healthy
+    restart: unless-stopped
+    networks: [idp]
+
+  preprocess-worker:
+    build:
+      context: .
+      dockerfile: docker/python-service.Dockerfile
+      args:
+        UV_GROUP: preprocess
+        EXTRA_APT_PACKAGES: libglib2.0-0 libgl1 libsm6 libxext6 libxrender1
+    command: uvicorn preprocess_worker.app.main:app --host 0.0.0.0 --port 8010
+    env_file: .env
+    depends_on:
+      seaweedfs:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8010/health')\""]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks: [idp]
+
+  ocr-service:
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: docker/python-service.Dockerfile
+      args:
+        UV_GROUP: ocr
+        EXTRA_APT_PACKAGES: libglib2.0-0 libgl1 libsm6 libxext6 libxrender1
+    command: uvicorn ocr_service.app.main:app --host 0.0.0.0 --port 8011
+    env_file: .env
+    depends_on:
+      preprocess-worker:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8011/health')\""]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks: [idp]
+
+  layout-service:
+    build:
+      context: .
+      dockerfile: docker/python-service.Dockerfile
+      args:
+        UV_GROUP: layout
+        EXTRA_APT_PACKAGES: libglib2.0-0 libgl1 libsm6 libxext6 libxrender1
+    command: uvicorn layout_service.app.main:app --host 0.0.0.0 --port 8012
+    env_file: .env
+    depends_on:
+      ocr-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8012/health')\""]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks: [idp]
+
+  classifier-router-service:
+    build:
+      context: .
+      dockerfile: docker/python-service.Dockerfile
+      args:
+        UV_GROUP: base
+    command: uvicorn classifier_router_service.app.main:app --host 0.0.0.0 --port 8013
+    env_file: .env
+    depends_on:
+      ocr-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8013/health')\""]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks: [idp]
+
+  extraction-service:
+    build:
+      context: .
+      dockerfile: docker/python-service.Dockerfile
+      args:
+        UV_GROUP: extraction
+    command: uvicorn extraction_service.app.main:app --host 0.0.0.0 --port 8014
+    env_file: .env
+    depends_on:
+      layout-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8014/health')\""]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks: [idp]
+
+  validation-service:
+    build:
+      context: .
+      dockerfile: docker/python-service.Dockerfile
+      args:
+        UV_GROUP: base
+    command: uvicorn validation_service.app.main:app --host 0.0.0.0 --port 8015
+    env_file: .env
+    depends_on:
+      extraction-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8015/health')\""]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks: [idp]
+
+  human-review-console:
+    build:
+      context: .
+      dockerfile: docker/python-service.Dockerfile
+      args:
+        UV_GROUP: base
+    command: uvicorn human_review_console.app.main:app --host 0.0.0.0 --port 8016
+    env_file: .env
+    depends_on:
+      label-studio:
+        condition: service_started
+    ports:
+      - "8016:8016"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8016/health')\""]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks: [idp]
+
+  delivery-service:
+    build:
+      context: .
+      dockerfile: docker/python-service.Dockerfile
+      args:
+        UV_GROUP: base
+    command: uvicorn delivery_service.app.main:app --host 0.0.0.0 --port 8017
+    env_file: .env
+    depends_on:
+      validation-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8017/health')\""]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks: [idp]
+
+  evaluation-service:
+    build:
+      context: .
+      dockerfile: docker/python-service.Dockerfile
+      args:
+        UV_GROUP: evaluation
+    command: uvicorn evaluation_service.app.main:app --host 0.0.0.0 --port 8018
+    env_file: .env
+    depends_on:
+      mlflow:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8018/health')\""]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks: [idp]
+
+  vllm:
+    image: vllm/vllm-openai:latest
+    profiles: ["gpu"]
+    command:
+      - --model
+      - ${VLLM_MODEL_SOURCE:-Qwen/Qwen2.5-VL-7B-Instruct}
+      - --served-model-name
+      - ${VLLM_MODEL:-vlm-fallback}
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --max-model-len
+      - "8192"
+    environment:
+      VLLM_API_KEY: ${VLLM_API_KEY:-EMPTY}
+    ports:
+      - "8009:8000"
+    shm_size: 16gb
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+    restart: unless-stopped
+    networks: [idp]
+
+  mlflow:
+    build:
+      context: .
+      dockerfile: docker/mlflow.Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      seaweedfs:
+        condition: service_healthy
+    command: >
+      mlflow server
+      --host 0.0.0.0
+      --port 5000
+      --backend-store-uri postgresql://${POSTGRES_USER:-idp}:${POSTGRES_PASSWORD:-idp_password}@postgres:5432/mlflow
+      --artifacts-destination s3://${MLFLOW_BUCKET:-mlflow-artifacts}
+      --serve-artifacts
+    environment:
+      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY:-${MINIO_ACCESS_KEY:-idpadmin}}
+      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:-${MINIO_SECRET_KEY:-idpsecret123}}
+      MLFLOW_S3_ENDPOINT_URL: ${MLFLOW_S3_ENDPOINT_URL:-http://${S3_ENDPOINT:-${MINIO_ENDPOINT:-seaweedfs:8333}}}
+    ports:
+      - "${MLFLOW_HOST_PORT:-5001}:5000"
+    restart: unless-stopped
+    networks: [idp]
+
+  label-studio:
+    image: heartexlabs/label-studio:latest
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DJANGO_DB: default
+      POSTGRE_NAME: labelstudio
+      POSTGRE_USER: ${POSTGRES_USER:-idp}
+      POSTGRE_PASSWORD: ${POSTGRES_PASSWORD:-idp_password}
+      POSTGRE_PORT: 5432
+      POSTGRE_HOST: postgres
+      REDIS_LOCATION: redis://redis:6379/1
+      LABEL_STUDIO_DISABLE_SIGNUP_WITHOUT_LINK: "true"
+      LABEL_STUDIO_LOCAL_FILES_SERVING_ENABLED: "true"
+    command: label-studio start --host 0.0.0.0 --port 8080
+    volumes:
+      - labelstudio_data:/label-studio/data
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    networks: [idp]
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --web.enable-lifecycle
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./infra/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+    networks: [idp]
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    depends_on:
+      - prometheus
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./infra/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./infra/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./infra/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+    networks: [idp]
+
+networks:
+  idp:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  seaweedfs_data:
+  labelstudio_data:
+  prometheus_data:
+  grafana_data:

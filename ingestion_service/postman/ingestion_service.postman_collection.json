@@ -1,0 +1,348 @@
+{
+  "info": {
+    "_postman_id": "0cde9b4f-548f-49ad-b27b-6ec5168a47c1",
+    "name": "IDP Ingestion Service",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "description": "Postman collection for ingestion_service endpoints (auth, intake, status, audit, result)."
+  },
+  "item": [
+    {
+      "name": "Health",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/health",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "health"
+          ]
+        },
+        "description": "Service health endpoint."
+      },
+      "response": []
+    },
+    {
+      "name": "Submit Document (New Job)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+              "const body = pm.response.json();",
+              "pm.collectionVariables.set('jobId', body.job_id || '');",
+              "pm.collectionVariables.set('workflowId', body.workflow_id || '');",
+              "pm.collectionVariables.set('artifactUri', body.artifact_uri || '');",
+              "pm.collectionVariables.set('statusUrl', body.status_url || '');"
+            ],
+            "type": "text/javascript"
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "X-API-Key",
+            "value": "{{apiKey}}",
+            "type": "text"
+          },
+          {
+            "key": "X-Tenant-Id",
+            "value": "{{tenantId}}",
+            "type": "text"
+          },
+          {
+            "key": "X-Actor-Id",
+            "value": "{{actorId}}",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "formdata",
+          "formdata": [
+            {
+              "key": "file",
+              "type": "file",
+              "src": "{{sampleFilePath}}"
+            },
+            {
+              "key": "source",
+              "value": "{{source}}",
+              "type": "text"
+            },
+            {
+              "key": "external_reference",
+              "value": "postman-manual-upload",
+              "type": "text"
+            }
+          ]
+        },
+        "url": {
+          "raw": "{{baseUrl}}/documents",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "documents"
+          ]
+        },
+        "description": "Submit a new file. Saves jobId/workflowId/artifactUri into collection variables."
+      },
+      "response": []
+    },
+    {
+      "name": "Submit Document (Idempotent)",
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "exec": [
+              "if (!pm.collectionVariables.get('idempotencyKey')) {",
+              "  pm.collectionVariables.set('idempotencyKey', 'idem-' + Date.now());",
+              "}"
+            ],
+            "type": "text/javascript"
+          }
+        },
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('status is 200', function () { pm.response.to.have.status(200); });",
+              "const body = pm.response.json();",
+              "pm.collectionVariables.set('jobId', body.job_id || '');"
+            ],
+            "type": "text/javascript"
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "X-API-Key",
+            "value": "{{apiKey}}",
+            "type": "text"
+          },
+          {
+            "key": "X-Tenant-Id",
+            "value": "{{tenantId}}",
+            "type": "text"
+          },
+          {
+            "key": "X-Actor-Id",
+            "value": "{{actorId}}",
+            "type": "text"
+          },
+          {
+            "key": "Idempotency-Key",
+            "value": "{{idempotencyKey}}",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "formdata",
+          "formdata": [
+            {
+              "key": "file",
+              "type": "file",
+              "src": "{{sampleFilePath}}"
+            },
+            {
+              "key": "source",
+              "value": "{{source}}",
+              "type": "text"
+            },
+            {
+              "key": "external_reference",
+              "value": "postman-idempotent-upload",
+              "type": "text"
+            }
+          ]
+        },
+        "url": {
+          "raw": "{{baseUrl}}/documents",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "documents"
+          ]
+        },
+        "description": "Run twice with the same Idempotency-Key to verify replay behavior."
+      },
+      "response": []
+    },
+    {
+      "name": "Get Document Status",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "X-API-Key",
+            "value": "{{apiKey}}"
+          },
+          {
+            "key": "X-Tenant-Id",
+            "value": "{{tenantId}}"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/documents/{{jobId}}",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "documents",
+            "{{jobId}}"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "List Documents",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "X-API-Key",
+            "value": "{{apiKey}}"
+          },
+          {
+            "key": "X-Tenant-Id",
+            "value": "{{tenantId}}"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/documents?limit=20",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "documents"
+          ],
+          "query": [
+            {
+              "key": "limit",
+              "value": "20"
+            }
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Get Audit Trail",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "X-API-Key",
+            "value": "{{apiKey}}"
+          },
+          {
+            "key": "X-Tenant-Id",
+            "value": "{{tenantId}}"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/documents/{{jobId}}/audit?limit=100",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "documents",
+            "{{jobId}}",
+            "audit"
+          ],
+          "query": [
+            {
+              "key": "limit",
+              "value": "100"
+            }
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Get Workflow Result",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "X-API-Key",
+            "value": "{{apiKey}}"
+          },
+          {
+            "key": "X-Tenant-Id",
+            "value": "{{tenantId}}"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/documents/{{jobId}}/result",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "documents",
+            "{{jobId}}",
+            "result"
+          ]
+        }
+      },
+      "response": []
+    }
+  ],
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8000"
+    },
+    {
+      "key": "apiKey",
+      "value": "dev-ingestion-key"
+    },
+    {
+      "key": "tenantId",
+      "value": "default"
+    },
+    {
+      "key": "actorId",
+      "value": "postman-user"
+    },
+    {
+      "key": "source",
+      "value": "api"
+    },
+    {
+      "key": "sampleFilePath",
+      "value": "samples/documents/sample_invoice_001.png"
+    },
+    {
+      "key": "jobId",
+      "value": ""
+    },
+    {
+      "key": "workflowId",
+      "value": ""
+    },
+    {
+      "key": "artifactUri",
+      "value": ""
+    },
+    {
+      "key": "statusUrl",
+      "value": ""
+    },
+    {
+      "key": "idempotencyKey",
+      "value": ""
+    }
+  ]
+}
