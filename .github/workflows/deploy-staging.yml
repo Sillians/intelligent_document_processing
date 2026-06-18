@@ -96,10 +96,23 @@ jobs:
           chmod 700 ~/.ssh
           printf '%s\n' "$STAGING_SSH_KEY" > ~/.ssh/id_staging
           chmod 600 ~/.ssh/id_staging
+          if ! ssh-keygen -y -f ~/.ssh/id_staging >/dev/null 2>&1; then
+            echo "STAGING_SSH_KEY is not a valid private key. Store the full private key, including BEGIN/END lines, as the staging environment secret." >&2
+            exit 1
+          fi
           if [ -n "$STAGING_KNOWN_HOSTS" ]; then
+            echo "Using configured STAGING_KNOWN_HOSTS."
             printf '%s\n' "$STAGING_KNOWN_HOSTS" > ~/.ssh/known_hosts
           else
-            ssh-keyscan -p "$STAGING_PORT" "$STAGING_HOST" >> ~/.ssh/known_hosts
+            echo "STAGING_KNOWN_HOSTS is not configured; scanning ${STAGING_HOST}:${STAGING_PORT}."
+            if ! ssh-keyscan -T 10 -p "$STAGING_PORT" "$STAGING_HOST" >> ~/.ssh/known_hosts; then
+              echo "Unable to scan SSH host key for ${STAGING_HOST}:${STAGING_PORT}. Verify STAGING_HOST/STAGING_PORT are reachable from GitHub-hosted runners, or set STAGING_KNOWN_HOSTS explicitly." >&2
+              exit 1
+            fi
+          fi
+          if [ ! -s ~/.ssh/known_hosts ]; then
+            echo "known_hosts is empty. Set STAGING_KNOWN_HOSTS to the verified ssh-keyscan output for the staging host." >&2
+            exit 1
           fi
           chmod 600 ~/.ssh/known_hosts
 

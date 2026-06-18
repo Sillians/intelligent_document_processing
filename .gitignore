@@ -163,6 +163,10 @@ ENV/
 env.bak/
 venv.bak/
 
+# Local deployment SSH keys
+id_ed25519*
+id_rsa*
+
 # Spyder project settings
 .spyderproject
 .spyproject
