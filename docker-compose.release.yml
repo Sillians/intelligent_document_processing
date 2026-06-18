@@ -1,0 +1,9 @@
+services:
+  ingestion-service:
+    image: ${IDP_IMAGE_REGISTRY:?set IDP_IMAGE_REGISTRY}/ingestion-service:${IDP_IMAGE_TAG:?set IDP_IMAGE_TAG}
+
+  workflow-orchestrator:
+    image: ${IDP_IMAGE_REGISTRY:?set IDP_IMAGE_REGISTRY}/workflow-orchestrator:${IDP_IMAGE_TAG:?set IDP_IMAGE_TAG}
+
+  delivery-service:
+    image: ${IDP_IMAGE_REGISTRY:?set IDP_IMAGE_REGISTRY}/delivery-service:${IDP_IMAGE_TAG:?set IDP_IMAGE_TAG}

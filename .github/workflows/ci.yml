@@ -1,0 +1,146 @@
+name: IDP CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: idp-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.11"
+  UV_VERSION: "0.9.4"
+  CI_ENV_FILE: infra/ci/production.env
+
+jobs:
+  python-contracts:
+    name: Python contract tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache uv packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/uv
+          key: uv-${{ runner.os }}-${{ env.PYTHON_VERSION }}-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            uv-${{ runner.os }}-${{ env.PYTHON_VERSION }}-
+
+      - name: Install uv
+        run: python -m pip install "uv==${UV_VERSION}"
+
+      - name: Install test dependencies
+        run: >
+          uv sync --frozen --no-default-groups
+          --group temporal
+          --group preprocess
+          --group extraction
+          --group evaluation
+          --group research
+
+      - name: Run unit and contract tests
+        env:
+          PYTHONPATH: .
+        run: >
+          uv run --no-sync python -m unittest
+          tests.test_production_preflight
+          tests.client_api.test_public_contract
+          tests.e2e.test_full_pipeline_e2e
+          tests.benchmarks.test_dataset_benchmark
+          workflow_orchestrator.tests.test_pipeline
+          workflow_orchestrator.tests.test_activities
+          classifier_router_service.tests.test_main
+          extraction_service.tests.test_main
+          validation_service.tests.test_main
+          human_review_console.tests.test_main
+          delivery_service.tests.test_main
+          evaluation_service.tests.test_main
+          preprocess_worker.tests.test_main
+          ocr_service.tests.test_main
+          layout_service.tests.test_main
+          -v
+
+  compose-and-preflight:
+    name: Compose and production preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Validate production env fixture
+        run: python scripts/production_preflight.py --env-file "${CI_ENV_FILE}"
+
+      - name: Render local Compose config
+        env:
+          IDP_ENV_FILE: ${{ env.CI_ENV_FILE }}
+        run: docker compose --env-file "${CI_ENV_FILE}" config --quiet
+
+      - name: Render production Compose overlay
+        run: docker compose --env-file "${CI_ENV_FILE}" -f docker-compose.yml -f docker-compose.prod.yml config --quiet
+
+      - name: Check critical Docker build definitions
+        run: |
+          docker build --check --build-arg UV_GROUP=temporal -f docker/python-service.Dockerfile .
+          docker build --check -f docker/mlflow.Dockerfile .
+
+  secret-hygiene:
+    name: Secret hygiene
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Ensure real env files are not tracked
+        run: |
+          set -euo pipefail
+          if git ls-files --error-unmatch .env .env.production >/dev/null 2>&1; then
+            echo "Do not commit .env or .env.production" >&2
+            exit 1
+          fi
+
+      - name: Check committed env fixtures
+        run: |
+          set -euo pipefail
+          python scripts/production_preflight.py --env-file "${CI_ENV_FILE}"
+
+  docker-build-smoke:
+    name: Docker build smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    needs:
+      - compose-and-preflight
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:docker')
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build gateway-facing services
+        env:
+          IDP_ENV_FILE: ${{ env.CI_ENV_FILE }}
+        run: docker compose --env-file "${CI_ENV_FILE}" build ingestion-service workflow-orchestrator delivery-service

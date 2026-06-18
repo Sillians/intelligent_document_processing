@@ -1,0 +1,1 @@
+{"sample_id":"sample-invoice-001","dataset":"synthetic-smoke","split":"validation","image_path":"samples/documents/sample_invoice_001.png","ground_truth":{"expected_route":"invoice","expected_fields":{"invoice_number":"INV-2026-0515","total_amount":"3186.00","currency":"USD","vendor_name":"ACME SUPPLY SOLUTIONS LTD"}}}

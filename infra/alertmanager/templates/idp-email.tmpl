@@ -1,0 +1,23 @@
+{{ define "idp.email.subject" }}[{{ .Status | toUpper }}][{{ .CommonLabels.severity | toUpper }}] IDP {{ .CommonLabels.alertname }}{{ end }}
+
+{{ define "idp.email.html" }}
+<h2>IDP Alert: {{ .CommonLabels.alertname }}</h2>
+<p><strong>Status:</strong> {{ .Status }}</p>
+<p><strong>Severity:</strong> {{ .CommonLabels.severity }}</p>
+<p><strong>Alerts:</strong> {{ len .Alerts }}</p>
+<hr />
+{{ range .Alerts }}
+  <h3>{{ .Annotations.summary }}</h3>
+  <p>{{ .Annotations.description }}</p>
+  <ul>
+    <li><strong>Service:</strong> {{ .Labels.service }}</li>
+    <li><strong>Instance:</strong> {{ .Labels.instance }}</li>
+    <li><strong>Category:</strong> {{ .Labels.category }}</li>
+    <li><strong>Started:</strong> {{ .StartsAt }}</li>
+    <li><strong>Ended:</strong> {{ .EndsAt }}</li>
+  </ul>
+{{ end }}
+<hr />
+<p>Prometheus: <a href="http://localhost:9090/alerts">http://localhost:9090/alerts</a></p>
+<p>Grafana: <a href="http://localhost:3000/d/idp-overview/idp-overview">http://localhost:3000/d/idp-overview/idp-overview</a></p>
+{{ end }}

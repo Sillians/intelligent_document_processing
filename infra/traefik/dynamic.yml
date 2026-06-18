@@ -1,0 +1,49 @@
+http:
+  routers:
+    idp-api-http:
+      entryPoints:
+        - web
+      rule: "Path(`/`) || Path(`/health`) || (Method(`POST`) && Path(`/documents`)) || (Method(`GET`) && PathRegexp(`^/documents/[^/]+$`)) || (Method(`GET`) && PathRegexp(`^/documents/[^/]+/result$`))"
+      service: idp-ingestion
+      middlewares:
+        - idp-security-headers
+        - idp-rate-limit
+        - idp-buffering
+
+    idp-api-https:
+      entryPoints:
+        - websecure
+      rule: "Path(`/`) || Path(`/health`) || (Method(`POST`) && Path(`/documents`)) || (Method(`GET`) && PathRegexp(`^/documents/[^/]+$`)) || (Method(`GET`) && PathRegexp(`^/documents/[^/]+/result$`))"
+      service: idp-ingestion
+      tls: {}
+      middlewares:
+        - idp-security-headers
+        - idp-rate-limit
+        - idp-buffering
+
+  services:
+    idp-ingestion:
+      loadBalancer:
+        servers:
+          - url: "http://ingestion-service:8000"
+
+  middlewares:
+    idp-buffering:
+      buffering:
+        maxRequestBodyBytes: 26214400
+
+    idp-rate-limit:
+      rateLimit:
+        average: 60
+        burst: 120
+        period: 1m
+
+    idp-security-headers:
+      headers:
+        contentTypeNosniff: true
+        frameDeny: true
+        referrerPolicy: no-referrer
+        stsSeconds: 31536000
+        stsIncludeSubdomains: true
+        customResponseHeaders:
+          X-Permitted-Cross-Domain-Policies: none

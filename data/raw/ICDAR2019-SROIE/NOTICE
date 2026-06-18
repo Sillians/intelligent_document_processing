@@ -1,0 +1,65 @@
+NOTICE – Attribution for Third-Party Material
+Licensed Under Creative Commons Attribution 4.0 International
+=======================================================================
+
+This NOTICE file provides attribution and modification information for
+material included in this repository that is licensed under the
+Creative Commons Attribution 4.0 International Public License (CC-BY
+4.0). This file is for informational and compliance purposes only and
+does not modify or replace the terms of the applicable license.
+
+=======================================================================
+
+Third-Party Material Identification
+
+The following material incorporated into this repository is derived
+from a work licensed under CC-BY 4.0:
+
+Title: ICDAR 2019 Robust Reading Challenge on Scanned Receipts OCR and
+  Information Extraction (SROIE)
+
+Authors: Huang et al., ICDAR 2019 Robust Reading Challenge Organizers
+
+Source: https://rrc.cvc.uab.es/?ch=13&com=downloads
+
+License: Creative Commons Attribution 4.0 International
+License URL: https://creativecommons.org/licenses/by/4.0/
+
+=======================================================================
+
+Statement of Modifications
+
+The material identified above has been adapted and modified for use in
+this repository. Modifications are listed in this project's README
+file available here: https://github.com/jsdnrs/ICDAR2019-SROIE
+
+All modifications are made by the maintainers of this repository and not by the
+original creators.
+
+=======================================================================
+
+Attribution and No Endorsement
+
+This NOTICE is provided to satisfy the attribution requirements of
+Section 3(a) of the CC-BY 4.0 license.
+
+Nothing in this repository shall be construed as suggesting that the
+original creators or rights holders endorse this project or any
+modifications made to the original work.
+
+=======================================================================
+
+Scope of Application
+
+The CC-BY 4.0 license applies only to the portions of this repository
+derived from the third-party material identified above as incorporated
+here. All other content in this repository is licensed separately as
+indicated in the relevant files.
+
+=======================================================================
+
+Disclaimer
+
+The third-party material is provided under CC-BY 4.0 on an "AS-IS"
+basis, without warranties of any kind, consistent with the disclaimer
+provisions of that license.

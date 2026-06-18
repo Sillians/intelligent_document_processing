@@ -1,0 +1,230 @@
+name: Deploy Production
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: Immutable release-candidate image tag to promote.
+        required: true
+        type: string
+      staging_evidence_url:
+        description: URL for staging smoke/readiness evidence approved for promotion.
+        required: true
+        type: string
+      change_ticket:
+        description: Optional change ticket, incident, or release reference.
+        required: false
+        type: string
+      run_predeploy_backup:
+        description: Run a production backup drill before deployment.
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: idp-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Manually promote release candidate to production
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    environment: production
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.image_tag }}
+
+      - name: Resolve deployment metadata
+        env:
+          PRODUCTION_APP_DIR: ${{ vars.PRODUCTION_APP_DIR || '/opt/idp' }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          STAGING_EVIDENCE_URL: ${{ inputs.staging_evidence_url }}
+          CHANGE_TICKET: ${{ inputs.change_ticket }}
+        run: |
+          set -euo pipefail
+          if [ -z "$IMAGE_TAG" ]; then
+            echo "image_tag is required" >&2
+            exit 1
+          fi
+          if printf '%s' "$IMAGE_TAG" | grep -Eq '[[:space:]/]'; then
+            echo "image_tag must be a single immutable tag without spaces or slashes" >&2
+            exit 1
+          fi
+          if [ -z "$STAGING_EVIDENCE_URL" ]; then
+            echo "staging_evidence_url is required" >&2
+            exit 1
+          fi
+          image_namespace="ghcr.io/${GITHUB_REPOSITORY,,}"
+          evidence_dir="artifacts/production/deploy/${IMAGE_TAG}"
+          mkdir -p "$evidence_dir"
+          cat > "${evidence_dir}/promotion_request.json" <<JSON
+          {
+            "image_registry": "${image_namespace}",
+            "image_tag": "${IMAGE_TAG}",
+            "staging_evidence_url": "${STAGING_EVIDENCE_URL}",
+            "change_ticket": "${CHANGE_TICKET}",
+            "requested_by": "${GITHUB_ACTOR}",
+            "workflow_run": "${GITHUB_RUN_ID}",
+            "approved_environment": "production"
+          }
+          JSON
+          {
+            echo "IMAGE_NAMESPACE=${image_namespace}"
+            echo "IMAGE_TAG=${IMAGE_TAG}"
+            echo "PRODUCTION_APP_DIR=${PRODUCTION_APP_DIR}"
+            echo "EVIDENCE_DIR=${evidence_dir}"
+          } >> "$GITHUB_ENV"
+
+      - name: Validate production secrets
+        env:
+          PRODUCTION_HOST: ${{ secrets.PRODUCTION_HOST }}
+          PRODUCTION_USER: ${{ secrets.PRODUCTION_USER }}
+          PRODUCTION_SSH_KEY: ${{ secrets.PRODUCTION_SSH_KEY }}
+          PRODUCTION_ENV_FILE: ${{ secrets.PRODUCTION_ENV_FILE }}
+          PRODUCTION_PUBLIC_BASE_URL: ${{ secrets.PRODUCTION_PUBLIC_BASE_URL }}
+          PRODUCTION_SMOKE_API_KEY: ${{ secrets.PRODUCTION_SMOKE_API_KEY }}
+          PRODUCTION_PROMETHEUS_URL: ${{ secrets.PRODUCTION_PROMETHEUS_URL }}
+        run: |
+          set -euo pipefail
+          test -n "$PRODUCTION_HOST"
+          test -n "$PRODUCTION_USER"
+          test -n "$PRODUCTION_SSH_KEY"
+          test -n "$PRODUCTION_ENV_FILE"
+          test -n "$PRODUCTION_PUBLIC_BASE_URL"
+          test -n "$PRODUCTION_SMOKE_API_KEY"
+          test -n "$PRODUCTION_PROMETHEUS_URL"
+
+      - name: Configure SSH
+        env:
+          PRODUCTION_HOST: ${{ secrets.PRODUCTION_HOST }}
+          PRODUCTION_PORT: ${{ secrets.PRODUCTION_PORT || '22' }}
+          PRODUCTION_SSH_KEY: ${{ secrets.PRODUCTION_SSH_KEY }}
+          PRODUCTION_KNOWN_HOSTS: ${{ secrets.PRODUCTION_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$PRODUCTION_SSH_KEY" > ~/.ssh/id_production
+          chmod 600 ~/.ssh/id_production
+          if [ -n "$PRODUCTION_KNOWN_HOSTS" ]; then
+            printf '%s\n' "$PRODUCTION_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          else
+            ssh-keyscan -p "$PRODUCTION_PORT" "$PRODUCTION_HOST" >> ~/.ssh/known_hosts
+          fi
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Upload deployment bundle
+        env:
+          PRODUCTION_HOST: ${{ secrets.PRODUCTION_HOST }}
+          PRODUCTION_USER: ${{ secrets.PRODUCTION_USER }}
+          PRODUCTION_PORT: ${{ secrets.PRODUCTION_PORT || '22' }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/id_production -p "$PRODUCTION_PORT" "${PRODUCTION_USER}@${PRODUCTION_HOST}" \
+            "mkdir -p '${PRODUCTION_APP_DIR}/releases/${IMAGE_TAG}'"
+          tar \
+            --exclude='.git' \
+            --exclude='.venv' \
+            --exclude='artifacts' \
+            --exclude='data' \
+            --exclude='__pycache__' \
+            -czf - . | ssh -i ~/.ssh/id_production -p "$PRODUCTION_PORT" "${PRODUCTION_USER}@${PRODUCTION_HOST}" \
+            "tar -xzf - -C '${PRODUCTION_APP_DIR}/releases/${IMAGE_TAG}' && ln -sfn '${PRODUCTION_APP_DIR}/releases/${IMAGE_TAG}' '${PRODUCTION_APP_DIR}/current'"
+
+      - name: Install production env file
+        env:
+          PRODUCTION_HOST: ${{ secrets.PRODUCTION_HOST }}
+          PRODUCTION_USER: ${{ secrets.PRODUCTION_USER }}
+          PRODUCTION_PORT: ${{ secrets.PRODUCTION_PORT || '22' }}
+          PRODUCTION_ENV_FILE: ${{ secrets.PRODUCTION_ENV_FILE }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$PRODUCTION_ENV_FILE" | ssh -i ~/.ssh/id_production -p "$PRODUCTION_PORT" "${PRODUCTION_USER}@${PRODUCTION_HOST}" \
+            "cat > '${PRODUCTION_APP_DIR}/current/.env.production.tmp' && chmod 600 '${PRODUCTION_APP_DIR}/current/.env.production.tmp' && mv '${PRODUCTION_APP_DIR}/current/.env.production.tmp' '${PRODUCTION_APP_DIR}/current/.env.production'"
+
+      - name: Run production preflight
+        env:
+          PRODUCTION_HOST: ${{ secrets.PRODUCTION_HOST }}
+          PRODUCTION_USER: ${{ secrets.PRODUCTION_USER }}
+          PRODUCTION_PORT: ${{ secrets.PRODUCTION_PORT || '22' }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/id_production -p "$PRODUCTION_PORT" "${PRODUCTION_USER}@${PRODUCTION_HOST}" \
+            "cd '${PRODUCTION_APP_DIR}/current' && \
+             export IDP_ENV_FILE=.env.production && \
+             export IDP_IMAGE_REGISTRY='${IMAGE_NAMESPACE}' && \
+             export IDP_IMAGE_TAG='${IMAGE_TAG}' && \
+             python3 scripts/production_preflight.py --env-file .env.production && \
+             docker compose --env-file .env.production -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.release.yml config --quiet"
+
+      - name: Run predeploy production backup
+        if: inputs.run_predeploy_backup
+        env:
+          PRODUCTION_HOST: ${{ secrets.PRODUCTION_HOST }}
+          PRODUCTION_USER: ${{ secrets.PRODUCTION_USER }}
+          PRODUCTION_PORT: ${{ secrets.PRODUCTION_PORT || '22' }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/id_production -p "$PRODUCTION_PORT" "${PRODUCTION_USER}@${PRODUCTION_HOST}" \
+            "cd '${PRODUCTION_APP_DIR}/current' && \
+             python3 scripts/staging_operational_drill.py backup \
+               --env-file .env.production \
+               --compose-file docker-compose.yml \
+               --compose-file docker-compose.prod.yml \
+               --artifact-dir 'artifacts/production/predeploy-backup/${IMAGE_TAG}'"
+          scp -i ~/.ssh/id_production -P "$PRODUCTION_PORT" \
+            "${PRODUCTION_USER}@${PRODUCTION_HOST}:${PRODUCTION_APP_DIR}/current/artifacts/production/predeploy-backup/${IMAGE_TAG}/backup_manifest.json" \
+            "${EVIDENCE_DIR}/predeploy_backup_manifest.json"
+
+      - name: Deploy services on production
+        env:
+          PRODUCTION_HOST: ${{ secrets.PRODUCTION_HOST }}
+          PRODUCTION_USER: ${{ secrets.PRODUCTION_USER }}
+          PRODUCTION_PORT: ${{ secrets.PRODUCTION_PORT || '22' }}
+          GHCR_USERNAME: ${{ github.actor }}
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/id_production -p "$PRODUCTION_PORT" "${PRODUCTION_USER}@${PRODUCTION_HOST}" \
+            "cd '${PRODUCTION_APP_DIR}/current' && \
+             echo '${GHCR_TOKEN}' | docker login ghcr.io -u '${GHCR_USERNAME}' --password-stdin && \
+             export IDP_ENV_FILE=.env.production && \
+             export IDP_IMAGE_REGISTRY='${IMAGE_NAMESPACE}' && \
+             export IDP_IMAGE_TAG='${IMAGE_TAG}' && \
+             docker compose --env-file .env.production -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.release.yml pull ingestion-service workflow-orchestrator delivery-service && \
+             docker compose --env-file .env.production -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.release.yml up -d --no-build --no-deps gateway ingestion-service workflow-orchestrator delivery-service && \
+             docker compose --env-file .env.production -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.release.yml ps gateway ingestion-service workflow-orchestrator delivery-service"
+
+      - name: Run post-deploy production smoke
+        env:
+          PRODUCTION_PUBLIC_BASE_URL: ${{ secrets.PRODUCTION_PUBLIC_BASE_URL }}
+          PRODUCTION_SMOKE_API_KEY: ${{ secrets.PRODUCTION_SMOKE_API_KEY }}
+          PRODUCTION_TENANT_ID: ${{ vars.PRODUCTION_TENANT_ID || 'default' }}
+          PRODUCTION_PROMETHEUS_URL: ${{ secrets.PRODUCTION_PROMETHEUS_URL }}
+        run: |
+          set -euo pipefail
+          python3 scripts/staging_operational_drill.py smoke \
+            --api-url "$PRODUCTION_PUBLIC_BASE_URL" \
+            --api-key "$PRODUCTION_SMOKE_API_KEY" \
+            --tenant-id "$PRODUCTION_TENANT_ID" \
+            --prometheus-url "$PRODUCTION_PROMETHEUS_URL" \
+            --require-observability \
+            --artifact-dir "artifacts/production/smoke/${IMAGE_TAG}"
+
+      - name: Upload production deployment artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-deploy-${{ env.IMAGE_TAG }}
+          path: |
+            artifacts/production/deploy/${{ env.IMAGE_TAG }}
+            artifacts/production/smoke/${{ env.IMAGE_TAG }}
+          if-no-files-found: ignore

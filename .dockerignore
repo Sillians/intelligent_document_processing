@@ -1,0 +1,15 @@
+.git
+.gitignore
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.log
+*.tmp
+*.swp
+data/
+Notes/
+*.egg-info/
+.env
+.DS_Store

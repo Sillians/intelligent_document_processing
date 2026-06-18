@@ -1,0 +1,162 @@
+name: idp-production-stack
+
+x-production-defaults: &production-defaults
+  init: true
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  logging:
+    driver: json-file
+    options:
+      max-size: "20m"
+      max-file: "5"
+  stop_grace_period: 45s
+  tmpfs:
+    - /tmp:size=1g,mode=1777
+
+x-infra-defaults: &infra-defaults
+  init: true
+  logging:
+    driver: json-file
+    options:
+      max-size: "20m"
+      max-file: "5"
+  stop_grace_period: 45s
+  tmpfs:
+    - /tmp:size=1g,mode=1777
+
+x-python-service-limits: &python-service-limits
+  cpus: "${IDP_SERVICE_CPUS:-1.0}"
+  mem_limit: "${IDP_SERVICE_MEM_LIMIT:-2g}"
+  pids_limit: 512
+
+services:
+  gateway:
+    <<: *infra-defaults
+    cpus: "${GATEWAY_CPUS:-0.5}"
+    mem_limit: "${GATEWAY_MEM_LIMIT:-512m}"
+    pids_limit: 256
+
+  postgres:
+    <<: *infra-defaults
+    cpus: "${POSTGRES_CPUS:-1.0}"
+    mem_limit: "${POSTGRES_MEM_LIMIT:-2g}"
+    pids_limit: 512
+
+  redis:
+    <<: *infra-defaults
+    cpus: "${REDIS_CPUS:-0.5}"
+    mem_limit: "${REDIS_MEM_LIMIT:-512m}"
+    pids_limit: 256
+
+  seaweedfs:
+    <<: *infra-defaults
+    cpus: "${SEAWEEDFS_CPUS:-1.0}"
+    mem_limit: "${SEAWEEDFS_MEM_LIMIT:-2g}"
+    pids_limit: 512
+
+  temporal:
+    <<: *infra-defaults
+    cpus: "${TEMPORAL_CPUS:-1.0}"
+    mem_limit: "${TEMPORAL_MEM_LIMIT:-2g}"
+    pids_limit: 512
+
+  temporal-ui:
+    <<: *infra-defaults
+    cpus: "${TEMPORAL_UI_CPUS:-0.5}"
+    mem_limit: "${TEMPORAL_UI_MEM_LIMIT:-512m}"
+    pids_limit: 256
+
+  ingestion-service:
+    <<: [*production-defaults, *python-service-limits]
+    cpus: "${INGESTION_CPUS:-1.0}"
+    mem_limit: "${INGESTION_MEM_LIMIT:-1g}"
+    ports: !reset []
+
+  workflow-orchestrator:
+    <<: [*production-defaults, *python-service-limits]
+    cpus: "${ORCHESTRATOR_CPUS:-1.0}"
+    mem_limit: "${ORCHESTRATOR_MEM_LIMIT:-1g}"
+
+  preprocess-worker:
+    <<: [*production-defaults, *python-service-limits]
+    cpus: "${PREPROCESS_CPUS:-2.0}"
+    mem_limit: "${PREPROCESS_MEM_LIMIT:-4g}"
+
+  ocr-service:
+    <<: [*production-defaults, *python-service-limits]
+    cpus: "${OCR_CPUS:-2.0}"
+    mem_limit: "${OCR_MEM_LIMIT:-6g}"
+
+  layout-service:
+    <<: [*production-defaults, *python-service-limits]
+    cpus: "${LAYOUT_CPUS:-2.0}"
+    mem_limit: "${LAYOUT_MEM_LIMIT:-6g}"
+
+  classifier-router-service:
+    <<: [*production-defaults, *python-service-limits]
+    cpus: "${CLASSIFIER_CPUS:-0.5}"
+    mem_limit: "${CLASSIFIER_MEM_LIMIT:-1g}"
+
+  extraction-service:
+    <<: [*production-defaults, *python-service-limits]
+    cpus: "${EXTRACTION_CPUS:-1.0}"
+    mem_limit: "${EXTRACTION_MEM_LIMIT:-2g}"
+
+  validation-service:
+    <<: [*production-defaults, *python-service-limits]
+    cpus: "${VALIDATION_CPUS:-0.5}"
+    mem_limit: "${VALIDATION_MEM_LIMIT:-1g}"
+
+  human-review-console:
+    <<: [*production-defaults, *python-service-limits]
+    cpus: "${REVIEW_CPUS:-0.5}"
+    mem_limit: "${REVIEW_MEM_LIMIT:-1g}"
+
+  delivery-service:
+    <<: [*production-defaults, *python-service-limits]
+    cpus: "${DELIVERY_CPUS:-0.5}"
+    mem_limit: "${DELIVERY_MEM_LIMIT:-1g}"
+
+  evaluation-service:
+    <<: [*production-defaults, *python-service-limits]
+    cpus: "${EVALUATION_CPUS:-0.5}"
+    mem_limit: "${EVALUATION_MEM_LIMIT:-1g}"
+
+  vllm:
+    <<: *infra-defaults
+    cpus: "${VLLM_CPUS:-4.0}"
+    mem_limit: "${VLLM_MEM_LIMIT:-24g}"
+    pids_limit: 1024
+    shm_size: "${VLLM_SHM_SIZE:-16gb}"
+
+  mlflow:
+    <<: *production-defaults
+    cpus: "${MLFLOW_CPUS:-1.0}"
+    mem_limit: "${MLFLOW_MEM_LIMIT:-2g}"
+    pids_limit: 512
+
+  label-studio:
+    <<: *infra-defaults
+    cpus: "${LABEL_STUDIO_CPUS:-1.0}"
+    mem_limit: "${LABEL_STUDIO_MEM_LIMIT:-2g}"
+    pids_limit: 512
+
+  prometheus:
+    <<: *infra-defaults
+    cpus: "${PROMETHEUS_CPUS:-0.5}"
+    mem_limit: "${PROMETHEUS_MEM_LIMIT:-1g}"
+    pids_limit: 256
+
+  alertmanager:
+    <<: *infra-defaults
+    cpus: "${ALERTMANAGER_CPUS:-0.25}"
+    mem_limit: "${ALERTMANAGER_MEM_LIMIT:-256m}"
+    pids_limit: 128
+
+  grafana:
+    <<: *infra-defaults
+    cpus: "${GRAFANA_CPUS:-0.5}"
+    mem_limit: "${GRAFANA_MEM_LIMIT:-1g}"
+    pids_limit: 256

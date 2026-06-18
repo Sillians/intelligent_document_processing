@@ -1,0 +1,26 @@
+global:
+  resolve_timeout: 5m
+  smtp_smarthost: '__ALERT_EMAIL_SMARTHOST__'
+  smtp_from: '__ALERT_EMAIL_FROM__'
+  smtp_auth_username: '__ALERT_EMAIL_USERNAME__'
+  smtp_auth_password: '__ALERT_EMAIL_PASSWORD__'
+  smtp_require_tls: __ALERT_EMAIL_REQUIRE_TLS__
+
+route:
+  receiver: email-ops
+  group_by: ['alertname', 'severity', 'service', 'instance']
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: __ALERT_EMAIL_REPEAT_INTERVAL__
+
+receivers:
+  - name: email-ops
+    email_configs:
+      - to: '__ALERT_EMAIL_TO__'
+        send_resolved: true
+        headers:
+          subject: '{{ template "idp.email.subject" . }}'
+        html: '{{ template "idp.email.html" . }}'
+
+templates:
+  - /etc/alertmanager/templates/*.tmpl

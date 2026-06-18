@@ -1,0 +1,170 @@
+name: Deploy Staging
+
+on:
+  workflow_run:
+    workflows:
+      - Release Candidate
+    branches:
+      - main
+    types:
+      - completed
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: Image tag to deploy. Defaults to the selected commit SHA.
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: idp-staging
+  cancel-in-progress: false
+
+env:
+  SOURCE_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+jobs:
+  deploy:
+    name: Deploy release candidate to staging
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: staging
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+
+      - name: Resolve deployment metadata
+        env:
+          STAGING_APP_DIR: ${{ vars.STAGING_APP_DIR || '/opt/idp' }}
+        run: |
+          set -euo pipefail
+          image_namespace="ghcr.io/${GITHUB_REPOSITORY,,}"
+          image_tag="${{ inputs.image_tag }}"
+          if [ -z "$image_tag" ]; then
+            image_tag="${SOURCE_SHA}"
+          fi
+          {
+            echo "IMAGE_NAMESPACE=${image_namespace}"
+            echo "IMAGE_TAG=${image_tag}"
+            echo "STAGING_APP_DIR=${STAGING_APP_DIR}"
+          } >> "$GITHUB_ENV"
+
+      - name: Validate staging secrets
+        env:
+          STAGING_HOST: ${{ secrets.STAGING_HOST }}
+          STAGING_USER: ${{ secrets.STAGING_USER }}
+          STAGING_SSH_KEY: ${{ secrets.STAGING_SSH_KEY }}
+          STAGING_ENV_FILE: ${{ secrets.STAGING_ENV_FILE }}
+        run: |
+          set -euo pipefail
+          test -n "$STAGING_HOST"
+          test -n "$STAGING_USER"
+          test -n "$STAGING_SSH_KEY"
+          test -n "$STAGING_ENV_FILE"
+
+      - name: Configure SSH
+        env:
+          STAGING_HOST: ${{ secrets.STAGING_HOST }}
+          STAGING_PORT: ${{ secrets.STAGING_PORT || '22' }}
+          STAGING_SSH_KEY: ${{ secrets.STAGING_SSH_KEY }}
+          STAGING_KNOWN_HOSTS: ${{ secrets.STAGING_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$STAGING_SSH_KEY" > ~/.ssh/id_staging
+          chmod 600 ~/.ssh/id_staging
+          if [ -n "$STAGING_KNOWN_HOSTS" ]; then
+            printf '%s\n' "$STAGING_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          else
+            ssh-keyscan -p "$STAGING_PORT" "$STAGING_HOST" >> ~/.ssh/known_hosts
+          fi
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Upload deployment bundle
+        env:
+          STAGING_HOST: ${{ secrets.STAGING_HOST }}
+          STAGING_USER: ${{ secrets.STAGING_USER }}
+          STAGING_PORT: ${{ secrets.STAGING_PORT || '22' }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/id_staging -p "$STAGING_PORT" "${STAGING_USER}@${STAGING_HOST}" \
+            "mkdir -p '${STAGING_APP_DIR}/releases/${SOURCE_SHA}'"
+          tar \
+            --exclude='.git' \
+            --exclude='.venv' \
+            --exclude='artifacts' \
+            --exclude='data' \
+            --exclude='__pycache__' \
+            -czf - . | ssh -i ~/.ssh/id_staging -p "$STAGING_PORT" "${STAGING_USER}@${STAGING_HOST}" \
+            "tar -xzf - -C '${STAGING_APP_DIR}/releases/${SOURCE_SHA}' && ln -sfn '${STAGING_APP_DIR}/releases/${SOURCE_SHA}' '${STAGING_APP_DIR}/current'"
+
+      - name: Install staging env file
+        env:
+          STAGING_HOST: ${{ secrets.STAGING_HOST }}
+          STAGING_USER: ${{ secrets.STAGING_USER }}
+          STAGING_PORT: ${{ secrets.STAGING_PORT || '22' }}
+          STAGING_ENV_FILE: ${{ secrets.STAGING_ENV_FILE }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$STAGING_ENV_FILE" | ssh -i ~/.ssh/id_staging -p "$STAGING_PORT" "${STAGING_USER}@${STAGING_HOST}" \
+            "cat > '${STAGING_APP_DIR}/current/.env.staging.tmp' && chmod 600 '${STAGING_APP_DIR}/current/.env.staging.tmp' && mv '${STAGING_APP_DIR}/current/.env.staging.tmp' '${STAGING_APP_DIR}/current/.env.staging'"
+
+      - name: Deploy services on staging
+        env:
+          STAGING_HOST: ${{ secrets.STAGING_HOST }}
+          STAGING_USER: ${{ secrets.STAGING_USER }}
+          STAGING_PORT: ${{ secrets.STAGING_PORT || '22' }}
+          GHCR_USERNAME: ${{ github.actor }}
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/id_staging -p "$STAGING_PORT" "${STAGING_USER}@${STAGING_HOST}" \
+            "cd '${STAGING_APP_DIR}/current' && \
+             echo '${GHCR_TOKEN}' | docker login ghcr.io -u '${GHCR_USERNAME}' --password-stdin && \
+             export IDP_ENV_FILE=.env.staging && \
+             export IDP_IMAGE_REGISTRY='${IMAGE_NAMESPACE}' && \
+             export IDP_IMAGE_TAG='${IMAGE_TAG}' && \
+             docker compose --env-file .env.staging -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.staging.yml config --quiet && \
+             docker compose --env-file .env.staging -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.staging.yml pull ingestion-service workflow-orchestrator delivery-service && \
+             docker compose --env-file .env.staging -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.staging.yml up -d --no-build --no-deps gateway ingestion-service workflow-orchestrator delivery-service && \
+             docker compose --env-file .env.staging -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.staging.yml ps gateway ingestion-service workflow-orchestrator delivery-service"
+
+      - name: Run post-deploy staging smoke
+        env:
+          STAGING_PUBLIC_BASE_URL: ${{ secrets.STAGING_PUBLIC_BASE_URL }}
+          STAGING_SMOKE_API_KEY: ${{ secrets.STAGING_SMOKE_API_KEY }}
+          STAGING_TENANT_ID: ${{ vars.STAGING_TENANT_ID || 'default' }}
+          STAGING_PROMETHEUS_URL: ${{ secrets.STAGING_PROMETHEUS_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "$STAGING_PUBLIC_BASE_URL" ] || [ -z "$STAGING_SMOKE_API_KEY" ]; then
+            echo "Skipping staging smoke: STAGING_PUBLIC_BASE_URL or STAGING_SMOKE_API_KEY is not configured."
+            exit 0
+          fi
+          args=(
+            smoke
+            --api-url "$STAGING_PUBLIC_BASE_URL"
+            --api-key "$STAGING_SMOKE_API_KEY"
+            --tenant-id "$STAGING_TENANT_ID"
+            --artifact-dir "artifacts/staging/smoke/${SOURCE_SHA}"
+          )
+          if [ -n "$STAGING_PROMETHEUS_URL" ]; then
+            args+=(--prometheus-url "$STAGING_PROMETHEUS_URL" --require-observability)
+          fi
+          python3 scripts/staging_operational_drill.py "${args[@]}"
+
+      - name: Upload staging smoke artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: staging-smoke-${{ env.SOURCE_SHA }}
+          path: artifacts/staging/smoke/${{ env.SOURCE_SHA }}
+          if-no-files-found: ignore

@@ -1,0 +1,26 @@
+global:
+  checkNewVersion: false
+  sendAnonymousUsage: false
+
+api:
+  dashboard: false
+
+entryPoints:
+  web:
+    address: ":8081"
+  websecure:
+    address: ":8443"
+
+providers:
+  file:
+    filename: /etc/traefik/dynamic.yml
+    watch: true
+
+accessLog:
+  format: json
+
+log:
+  level: INFO
+
+ping:
+  entryPoint: web
