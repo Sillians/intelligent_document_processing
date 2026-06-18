@@ -64,10 +64,25 @@ jobs:
           STAGING_ENV_FILE: ${{ secrets.STAGING_ENV_FILE }}
         run: |
           set -euo pipefail
-          test -n "$STAGING_HOST"
-          test -n "$STAGING_USER"
-          test -n "$STAGING_SSH_KEY"
-          test -n "$STAGING_ENV_FILE"
+          missing=()
+          if [ -z "$STAGING_HOST" ]; then
+            missing+=("STAGING_HOST")
+          fi
+          if [ -z "$STAGING_USER" ]; then
+            missing+=("STAGING_USER")
+          fi
+          if [ -z "$STAGING_SSH_KEY" ]; then
+            missing+=("STAGING_SSH_KEY")
+          fi
+          if [ -z "$STAGING_ENV_FILE" ]; then
+            missing+=("STAGING_ENV_FILE")
+          fi
+
+          if [ "${#missing[@]}" -gt 0 ]; then
+            printf 'Missing required staging secret(s): %s\n' "${missing[*]}" >&2
+            printf 'Configure these under repository Settings > Secrets and variables > Actions, or in the staging environment secrets.\n' >&2
+            exit 1
+          fi
 
       - name: Configure SSH
         env:
