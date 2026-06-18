@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.14-slim
 
 ARG UV_GROUP=base
 ARG EXTRA_APT_PACKAGES=""
