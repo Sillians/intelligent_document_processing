@@ -88,6 +88,7 @@ Run tests:
 ## Non-Goals
 - Layout reasoning and business field mapping.
 
+
 ## Change Log
 - 2026-05-21: Documentation sync update to reflect current service naming and cross-service ingestion contract expectations. No runtime code changes were applied to this service in this update.
 - 2026-05-26: Added PaddleOCR v3-compatible execution handling and deterministic fallback token behavior to avoid hard 500 failures when OCR runtime calls fail.

@@ -37,7 +37,10 @@ class Settings(BaseSettings):
     ocr_bucket: str = "ocr-artifacts"
     layout_bucket: str = "layout-artifacts"
     extraction_bucket: str = "extraction-artifacts"
+    validation_bucket: str = "validation-artifacts"
+    review_bucket: str = "review-artifacts"
     delivery_bucket: str = "delivery-artifacts"
+    evaluation_bucket: str = "evaluation-artifacts"
 
     temporal_address: str = "temporal:7233"
     temporal_namespace: str = "default"
@@ -79,7 +82,69 @@ class Settings(BaseSettings):
     preprocess_threshold_block_size: int = Field(default=35, ge=3)
     preprocess_threshold_c: int = Field(default=11, ge=-100, le=100)
     preprocess_enable_clahe: bool = True
+    preprocess_clahe_clip_limit: float = Field(default=2.0, ge=0.1, le=20.0)
+    preprocess_clahe_tile_grid_size: int = Field(default=8, ge=1, le=64)
+    preprocess_enable_deskew: bool = True
+    preprocess_enable_threshold: bool = True
+    preprocess_median_blur_kernel: int = Field(default=3, ge=1, le=31)
     preprocess_deskew_min_foreground_pixels: int = Field(default=64, ge=0)
+    preprocess_request_timeout_seconds: int = Field(default=60, ge=1)
+    preprocess_max_inflight_requests: int = Field(default=4, ge=1, le=32)
+    layout_model_config: str = "lp://PubLayNet/faster_rcnn_R_50_FPN_3x/config"
+    layout_model_score_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
+    layout_min_block_score: float = Field(default=0.35, ge=0.0, le=1.0)
+    layout_min_token_overlap: float = Field(default=0.1, ge=0.0, le=1.0)
+    layout_line_group_y_tolerance: int = Field(default=18, ge=1)
+    layout_request_timeout_seconds: int = Field(default=90, ge=1)
+    layout_max_inflight_requests: int = Field(default=2, ge=1, le=16)
+    classifier_auto_route_threshold: float = Field(default=0.68, ge=0.0, le=1.0)
+    classifier_min_text_chars: int = Field(default=12, ge=0)
+    classifier_request_timeout_seconds: int = Field(default=15, ge=1)
+    classifier_max_inflight_requests: int = Field(default=8, ge=1, le=64)
+    classifier_persist_decision: bool = True
+    extraction_request_timeout_seconds: int = Field(default=90, ge=1)
+    extraction_max_inflight_requests: int = Field(default=4, ge=1, le=32)
+    extraction_enable_vlm_fallback: bool = False
+    extraction_vlm_timeout_seconds: int = Field(default=60, ge=1)
+    extraction_prompt_max_chars: int = Field(default=8000, ge=500)
+    validation_profile: str = "default"
+    validation_policy_version: str = "2026-06-03"
+    validation_request_timeout_seconds: int = Field(default=30, ge=1)
+    validation_max_inflight_requests: int = Field(default=16, ge=1, le=128)
+    validation_min_field_confidence: float = Field(default=0.60, ge=0.0, le=1.0)
+    validation_auto_reject_threshold: float = Field(default=0.25, ge=0.0, le=1.0)
+    validation_persist_decision: bool = True
+    review_provider: str = "auto"
+    review_request_timeout_seconds: int = Field(default=30, ge=1)
+    review_label_studio_timeout_seconds: int = Field(default=30, ge=1)
+    review_max_inflight_requests: int = Field(default=16, ge=1, le=128)
+    review_high_priority_confidence_threshold: float = Field(default=0.50, ge=0.0, le=1.0)
+    review_fallback_to_local_queue: bool = True
+    review_persist_tasks: bool = True
+    delivery_providers: str = "object_storage"
+    delivery_require_approval: bool = True
+    delivery_allowed_approval_statuses: str = "auto_approved,human_approved"
+    delivery_request_timeout_seconds: int = Field(default=60, ge=1)
+    delivery_max_inflight_requests: int = Field(default=16, ge=1, le=128)
+    delivery_retry_max: int = Field(default=2, ge=0, le=10)
+    delivery_retry_backoff_seconds: float = Field(default=0.5, ge=0.0, le=60.0)
+    delivery_payload_format_version: str = "1.0"
+    delivery_redact_fields: str = ""
+    delivery_webhook_url: str = ""
+    delivery_webhook_secret: str = ""
+    delivery_webhook_require_signature: bool = True
+    delivery_allow_request_webhook_url: bool = False
+    delivery_webhook_allowed_hosts: str = ""
+    delivery_webhook_timeout_seconds: int = Field(default=15, ge=1)
+    evaluation_providers: str = "mlflow,artifact_store"
+    evaluation_mlflow_experiment: str = "idp_pipeline"
+    evaluation_dataset_version: str = "production"
+    evaluation_pipeline_version: str = "development"
+    evaluation_request_timeout_seconds: int = Field(default=60, ge=1)
+    evaluation_max_inflight_requests: int = Field(default=16, ge=1, le=128)
+    evaluation_retry_max: int = Field(default=1, ge=0, le=10)
+    evaluation_retry_backoff_seconds: float = Field(default=0.5, ge=0.0, le=60.0)
+    evaluation_fail_when_all_providers_fail: bool = False
     ocr_disable_mkldnn: bool = True
     ocr_language: str = "en"
     ocr_force_fallback: bool = False

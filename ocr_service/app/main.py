@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from concurrent.futures import Future, ThreadPoolExecutor
 import logging
 import os
@@ -19,8 +20,6 @@ from shared.idp_common.metrics import instrument_app
 from shared.idp_common.storage import download_bytes, upload_json
 
 settings = get_settings()
-app = FastAPI(title="ocr-service")
-instrument_app(app, "ocr-service")
 logger = logging.getLogger("ocr_service")
 
 _OCR_ENGINE = None
@@ -31,6 +30,23 @@ _OCR_MAX_INFLIGHT = max(1, int(getattr(settings, "ocr_max_inflight_requests", 1)
 _OCR_REQUEST_POOL = ThreadPoolExecutor(max_workers=_OCR_MAX_INFLIGHT, thread_name_prefix="ocr-worker")
 _OCR_INFLIGHT = 0
 _OCR_INFLIGHT_LOCK = Lock()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    if not bool(getattr(settings, "ocr_force_fallback", False)):
+        try:
+            await asyncio.to_thread(get_ocr_engine)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("OCR engine failed to initialize at startup", exc_info=exc)
+
+    yield
+
+    _OCR_REQUEST_POOL.shutdown(wait=False, cancel_futures=True)
+
+
+app = FastAPI(title="ocr-service", lifespan=lifespan)
+instrument_app(app, "ocr-service")
 
 
 class OCRRequest(BaseModel):
@@ -239,9 +255,9 @@ def _load_and_decode_image(preprocessed_key: str) -> np.ndarray | None:
 
 def _normalize_input_image(image: np.ndarray) -> np.ndarray:
     if image.ndim == 2:
-        return cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+        return np.repeat(image[:, :, np.newaxis], 3, axis=2)
     if image.ndim == 3 and image.shape[2] == 4:
-        return cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
+        return image[:, :, :3]
     return image
 
 
@@ -326,29 +342,6 @@ def _build_response(
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
-
-# N/B: Work around this common OCR error:
-from contextlib import asynccontextmanager
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    try:
-        get_ocr_engine()
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("OCR engine failed to initialize at startup", exc_info=exc)
-    yield
-    _OCR_REQUEST_POOL.shutdown(wait=False, cancel_futures=True)
-
-@app.lifespan("shutdown")
-def shutdown_request_pool() -> None:
-    _OCR_REQUEST_POOL.shutdown(wait=False, cancel_futures=True)
-    
-@app.lifespan("startup")
-def startup_initialize_engine() -> None:
-    try:
-        get_ocr_engine()
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("OCR engine failed to initialize at startup", exc_info=exc)
 
 @app.post("/ocr")
 async def run_ocr(request: OCRRequest) -> dict:

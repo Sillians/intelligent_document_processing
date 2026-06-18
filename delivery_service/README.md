@@ -180,7 +180,7 @@ jobs/<job_id>/delivery/<delivery_id>/receipt.json
 If receipt persistence to `DELIVERY_BUCKET` fails, the service falls back to `VALIDATION_BUCKET`.
 
 ## Webhook Provider
-Enable webhook delivery globally:
+Enable final payload delivery to a webhook destination globally:
 
 ```env
 DELIVERY_PROVIDERS=object_storage,webhook
@@ -223,6 +223,27 @@ Webhook signatures are required by default:
 ```env
 DELIVERY_WEBHOOK_REQUIRE_SIGNATURE=true
 ```
+
+## Workflow Event Webhooks
+The workflow orchestrator also posts terminal client events to this service at
+`POST /webhooks/events`. The delivery service signs, retries, and persists the
+outbound event receipt.
+
+Emitted event types:
+
+- `document.completed`
+- `document.pending_human_review`
+- `document.failed`
+
+Event receipt artifact pattern:
+
+```text
+jobs/<job_id>/webhooks/<event_id>/receipt.json
+```
+
+If `DELIVERY_WEBHOOK_URL` is empty, event delivery is skipped but an audit
+receipt is still written. Consumers should deduplicate events by `event_id` and
+verify `X-IDP-Signature-256` when signatures are enabled.
 
 ## Redaction
 Configure top-level or nested field names that must be redacted from outbound payloads:

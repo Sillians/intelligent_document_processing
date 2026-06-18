@@ -25,6 +25,7 @@ base = [
 ]
 temporal = [
     { include-group = "base" },
+    "psycopg2-binary==2.9.9",
     "temporalio==1.10.0",
 ]
 orchestrator = [
@@ -59,6 +60,7 @@ evaluation = [
 research = [
     "datasets>=3.1.0",
     "huggingface-hub>=0.36.2",
+    "pillow==11.1.0",
     "polars>=1.8.2",
 ]
 dev = [

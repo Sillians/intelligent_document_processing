@@ -14,6 +14,7 @@ from human_review_console.app.main import (
     build_review_task_id,
     derive_priority,
     extract_label_studio_task_ref,
+    settings,
 )
 
 
@@ -115,7 +116,7 @@ class HumanReviewConsoleTests(unittest.TestCase):
     def test_label_studio_provider_requires_token(self) -> None:
         provider = LabelStudioProvider()
         task = ReviewTaskRequest(job_id="job-1", reasons=[], fields={}, confidence=0.9)
-        with self.assertRaises(RuntimeError):
+        with patch.object(settings, "label_studio_token", ""), self.assertRaises(RuntimeError):
             import asyncio
 
             asyncio.run(provider.create_task(task, review_task_id="review-1", payload={"route": "unknown", "verdict": "needs_review", "priority": "normal", "source": {}}))

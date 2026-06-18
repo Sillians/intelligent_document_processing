@@ -13,6 +13,7 @@ from workflow_orchestrator.app.pipeline import (
     build_delivery_payload,
     build_evaluation_payload,
     build_extraction_payload,
+    build_webhook_event_payload,
     build_layout_payload,
     build_ocr_payload,
     build_preprocess_payload,
@@ -29,6 +30,7 @@ with workflow.unsafe.imports_passed_through():
         evaluate_activity,
         extract_activity,
         layout_activity,
+        notify_webhook_activity,
         ocr_activity,
         preprocess_activity,
         validate_activity,
@@ -49,6 +51,8 @@ class DocumentPipelineWorkflow:
     @workflow.run
     async def run(self, payload: dict[str, Any]) -> dict[str, Any]:
         job_id = str(payload.get("job_id", "unknown"))
+        tenant_id = str(payload.get("tenant_id") or "default")
+        workflow_id = workflow.info().workflow_id
         workflow.logger.info("workflow started job_id=%s", job_id)
 
         final_status = "failed"
@@ -118,7 +122,7 @@ class DocumentPipelineWorkflow:
             else:
                 delivery = await workflow.execute_activity(
                     deliver_activity,
-                    build_delivery_payload(job_id, extraction),
+                    build_delivery_payload(job_id, extraction, validation),
                     start_to_close_timeout=SHORT_STAGE_TIMEOUT,
                     retry_policy=DEFAULT_RETRY,
                 )
@@ -136,12 +140,81 @@ class DocumentPipelineWorkflow:
                 "validation": validation,
                 **branch_payload,
             }
+            webhook_event_type = (
+                "document.pending_human_review"
+                if final_status == "pending_human_review"
+                else "document.completed"
+            )
+            try:
+                await workflow.execute_activity(
+                    notify_webhook_activity,
+                    build_webhook_event_payload(
+                        event_type=webhook_event_type,
+                        tenant_id=tenant_id,
+                        job_id=job_id,
+                        workflow_id=workflow_id,
+                        final_status=final_status,
+                        result=result,
+                    ),
+                    start_to_close_timeout=SHORT_STAGE_TIMEOUT,
+                    retry_policy=DEFAULT_RETRY,
+                )
+            except Exception as exc:  # noqa: BLE001
+                workflow.logger.warning(
+                    "webhook notification failed job_id=%s status=%s error=%s",
+                    job_id,
+                    final_status,
+                    str(exc),
+                )
             workflow.logger.info("workflow completed job_id=%s status=%s", job_id, final_status)
             return result
 
         except PipelineContractError as exc:
+            try:
+                await workflow.execute_activity(
+                    notify_webhook_activity,
+                    build_webhook_event_payload(
+                        event_type="document.failed",
+                        tenant_id=tenant_id,
+                        job_id=job_id,
+                        workflow_id=workflow_id,
+                        final_status="failed",
+                        error=str(exc),
+                    ),
+                    start_to_close_timeout=SHORT_STAGE_TIMEOUT,
+                    retry_policy=DEFAULT_RETRY,
+                )
+            except Exception as notify_exc:  # noqa: BLE001
+                workflow.logger.warning(
+                    "failed webhook notification failed job_id=%s error=%s",
+                    job_id,
+                    str(notify_exc),
+                )
             # Contract violations should not retry indefinitely; fail workflow deterministically.
             raise ApplicationError(str(exc), type="PipelineContractError", non_retryable=True) from exc
+
+        except Exception as exc:
+            try:
+                await workflow.execute_activity(
+                    notify_webhook_activity,
+                    build_webhook_event_payload(
+                        event_type="document.failed",
+                        tenant_id=tenant_id,
+                        job_id=job_id,
+                        workflow_id=workflow_id,
+                        final_status="failed",
+                        error=str(exc),
+                    ),
+                    start_to_close_timeout=SHORT_STAGE_TIMEOUT,
+                    retry_policy=DEFAULT_RETRY,
+                )
+            except Exception as notify_exc:  # noqa: BLE001
+                workflow.logger.warning(
+                    "failed webhook notification failed job_id=%s error=%s",
+                    job_id,
+                    str(notify_exc),
+                )
+            raise
 
         finally:
             evaluation_payload = build_evaluation_payload(

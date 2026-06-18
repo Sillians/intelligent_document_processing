@@ -21,10 +21,21 @@ class DeliveryRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class WebhookEventRequest(BaseModel):
+    event_type: str = Field(min_length=1, max_length=128)
+    tenant_id: str = Field(min_length=1, max_length=128)
+    job_id: str = Field(min_length=1, max_length=128)
+    workflow_id: str | None = Field(default=None, max_length=256)
+    event_id: str | None = Field(default=None, max_length=256)
+    occurred_at: str | None = Field(default=None, max_length=64)
+    data: dict[str, Any] = Field(default_factory=dict)
+    webhook_url: str | None = Field(default=None, max_length=2048)
+    idempotency_key: str | None = Field(default=None, max_length=256)
+
+
 @dataclass(frozen=True)
 class DeliveryContext:
     settings: Settings
     request: DeliveryRequest
     delivery_id: str
     envelope: dict[str, Any]
-

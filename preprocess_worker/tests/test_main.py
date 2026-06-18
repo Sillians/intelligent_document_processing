@@ -7,6 +7,18 @@ import numpy as np
 
 from preprocess_worker.app.main import _ensure_odd, _estimate_skew_angle, _normalize_to_bgr, preprocess_image
 
+HAS_FULL_OPENCV = all(
+    hasattr(cv2, name)
+    for name in (
+        "adaptiveThreshold",
+        "fastNlMeansDenoising",
+        "minAreaRect",
+        "putText",
+        "rectangle",
+        "threshold",
+    )
+)
+
 
 class PreprocessWorkerTests(unittest.TestCase):
     def test_ensure_odd_enforces_odd_and_minimum(self) -> None:
@@ -14,11 +26,13 @@ class PreprocessWorkerTests(unittest.TestCase):
         self.assertEqual(_ensure_odd(10), 11)
         self.assertEqual(_ensure_odd(35), 35)
 
+    @unittest.skipUnless(HAS_FULL_OPENCV, "OpenCV image processing runtime is not available")
     def test_estimate_skew_angle_blank_returns_zero(self) -> None:
         blank = np.full((200, 300), 255, dtype=np.uint8)
         angle = _estimate_skew_angle(blank, min_foreground_pixels=16)
         self.assertAlmostEqual(angle, 0.0, places=3)
 
+    @unittest.skipUnless(HAS_FULL_OPENCV, "OpenCV image processing runtime is not available")
     def test_preprocess_image_returns_bgr_and_metadata(self) -> None:
         image = np.full((260, 720, 3), 255, dtype=np.uint8)
         cv2.putText(
@@ -58,6 +72,7 @@ class PreprocessWorkerTests(unittest.TestCase):
         self.assertEqual(_normalize_to_bgr(gray).shape, (4, 5, 3))
         self.assertEqual(_normalize_to_bgr(alpha).shape, (4, 5, 3))
 
+    @unittest.skipUnless(HAS_FULL_OPENCV, "OpenCV image processing runtime is not available")
     def test_preprocess_image_respects_disabled_optional_steps(self) -> None:
         image = np.full((80, 120, 3), 255, dtype=np.uint8)
         cv2.rectangle(image, (10, 20), (90, 50), (0, 0, 0), -1)

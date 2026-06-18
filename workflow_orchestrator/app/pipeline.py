@@ -112,6 +112,8 @@ def build_extraction_payload(
         "layout_key": layout_key,
         "ocr_confidence": ocr_confidence,
         "route": route,
+        "strategy_profile": classification_result.get("strategy_profile"),
+        "extraction_mode": classification_result.get("extraction_mode"),
     }
 
 
@@ -121,13 +123,20 @@ def build_validation_payload(job_id: str, extraction_result: dict[str, Any]) -> 
     confidence = required_float(extraction_result, "confidence", stage="extraction")
     used_vlm_fallback = required_bool(extraction_result, "used_vlm_fallback", stage="extraction")
 
-    return {
+    payload: dict[str, Any] = {
         "job_id": job_id,
         "extraction_key": extraction_key,
         "fields": fields,
         "confidence": confidence,
         "used_vlm_fallback": used_vlm_fallback,
     }
+    extraction_bucket = extraction_result.get("extraction_bucket")
+    if isinstance(extraction_bucket, str) and extraction_bucket.strip():
+        payload["extraction_bucket"] = extraction_bucket.strip()
+    route = extraction_result.get("route")
+    if isinstance(route, str) and route.strip():
+        payload["route"] = route.strip()
+    return payload
 
 
 def should_route_to_human_review(validation_result: dict[str, Any]) -> bool:
@@ -139,17 +148,47 @@ def build_review_payload(job_id: str, extraction_result: dict[str, Any], validat
     fields = required_dict(extraction_result, "fields", stage="extraction")
     confidence = required_float(extraction_result, "confidence", stage="extraction")
 
-    return {
+    payload: dict[str, Any] = {
         "job_id": job_id,
         "reasons": reasons,
         "fields": fields,
         "confidence": confidence,
     }
+    for source, keys in (
+        (extraction_result, ("extraction_bucket", "extraction_key", "route")),
+        (validation_result, ("validation_bucket", "validation_key", "verdict")),
+    ):
+        for key in keys:
+            value = source.get(key)
+            if isinstance(value, str) and value.strip():
+                payload[key] = value.strip()
+    return payload
 
 
-def build_delivery_payload(job_id: str, extraction_result: dict[str, Any]) -> dict[str, Any]:
+def build_delivery_payload(
+    job_id: str,
+    extraction_result: dict[str, Any],
+    validation_result: dict[str, Any],
+) -> dict[str, Any]:
     fields = required_dict(extraction_result, "fields", stage="extraction")
-    return {"job_id": job_id, "payload": fields}
+    verdict = required_str(validation_result, "verdict", stage="validation")
+    payload: dict[str, Any] = {
+        "job_id": job_id,
+        "payload": fields,
+        "approval_status": verdict,
+    }
+    for source, keys in (
+        (extraction_result, ("extraction_bucket", "extraction_key")),
+        (validation_result, ("validation_bucket", "validation_key")),
+    ):
+        for key in keys:
+            value = source.get(key)
+            if isinstance(value, str) and value.strip():
+                payload[key] = value.strip()
+    route = extraction_result.get("route")
+    if isinstance(route, str) and route.strip():
+        payload["metadata"] = {"route": route.strip()}
+    return payload
 
 
 def build_evaluation_payload(
@@ -192,11 +231,62 @@ def build_evaluation_payload(
         except PipelineContractError:
             requires_human_review = False
 
-    return {
+    payload: dict[str, Any] = {
         "job_id": job_id,
         "status": final_status,
         "ocr_confidence": ocr_confidence,
         "extraction_confidence": extraction_confidence,
         "used_vlm_fallback": used_vlm_fallback,
         "requires_human_review": requires_human_review,
+    }
+    if extraction_result:
+        fields = extraction_result.get("fields")
+        if isinstance(fields, dict):
+            payload["field_count"] = len(fields)
+            payload["populated_field_count"] = sum(
+                1 for value in fields.values() if value is not None and str(value).strip()
+            )
+    if validation_result:
+        route = validation_result.get("route")
+        if isinstance(route, str) and route.strip():
+            payload["route"] = route.strip()
+        verdict = validation_result.get("verdict")
+        if isinstance(verdict, str) and verdict.strip():
+            payload["validation_verdict"] = verdict.strip()
+    return payload
+
+
+def build_webhook_event_payload(
+    *,
+    event_type: str,
+    tenant_id: str,
+    job_id: str,
+    workflow_id: str | None,
+    final_status: str,
+    result: dict[str, Any] | None = None,
+    error: str | None = None,
+) -> dict[str, Any]:
+    normalized_tenant_id = tenant_id or "default"
+    data: dict[str, Any] = {
+        "status": final_status,
+    }
+    if result:
+        data.update(
+            {
+                "classification": result.get("classification"),
+                "validation": result.get("validation"),
+                "delivery": result.get("delivery"),
+                "review_task": result.get("review_task"),
+            }
+        )
+    if error:
+        data["error"] = error[:500]
+
+    return {
+        "event_type": event_type,
+        "tenant_id": normalized_tenant_id,
+        "job_id": job_id,
+        "workflow_id": workflow_id,
+        "data": data,
+        "idempotency_key": f"{event_type}:{normalized_tenant_id}:{job_id}:{workflow_id or ''}",
     }

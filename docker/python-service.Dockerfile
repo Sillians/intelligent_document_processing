@@ -9,6 +9,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     UV_PROJECT_ENVIRONMENT=/opt/venv \
     UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
+    UV_HTTP_TIMEOUT=120 \
+    DEBIAN_FRONTEND=noninteractive \
+    XDG_CACHE_HOME=/tmp/.cache \
+    MPLCONFIGDIR=/tmp/.config/matplotlib \
     PATH="/opt/venv/bin:${PATH}" \
     PYTHONPATH=/app
 
@@ -16,9 +20,13 @@ RUN if [ -n "${EXTRA_APT_PACKAGES}" ]; then \
       apt-get update && apt-get install -y --no-install-recommends ${EXTRA_APT_PACKAGES} && rm -rf /var/lib/apt/lists/*; \
     fi
 
+RUN addgroup --system app && adduser --system --ingroup app --home /tmp app
+
 WORKDIR /app
 
 COPY pyproject.toml uv.lock /app/
-RUN uv sync --frozen --no-install-project --no-default-groups --group ${UV_GROUP}
+RUN uv sync --frozen --no-install-project --no-default-groups --only-group ${UV_GROUP}
 
 COPY . /app
+
+USER app

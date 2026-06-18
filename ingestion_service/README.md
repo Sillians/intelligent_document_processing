@@ -28,6 +28,10 @@ Accept documents from external sources, validate requests, persist raw artifacts
 - `GET /documents/{job_id}/audit`
 - `GET /documents/{job_id}/result`
 
+Public client/API consumer traffic should enter through the Traefik gateway, not
+the direct service port. See [`../infra/api/PUBLIC_API.md`](../infra/api/PUBLIC_API.md)
+for the tenant-facing contract and [`../clients/python/idp_client.py`](../clients/python/idp_client.py)
+for a dependency-free reference client.
 
 ## How To Run
 
@@ -153,6 +157,17 @@ Default HTTP metrics plus ingestion-specific metrics:
 - Raw artifact persistence issues return `503` and mark job `FAILED`.
 - Queue publish failures return `503` and mark job `FAILED`.
 - Unhandled exceptions are mapped to `500` with a safe error body.
+- Error responses use a stable envelope:
+```json
+{
+  "error": {
+    "code": "missing_api_credentials",
+    "message": "Missing API credentials",
+    "status": 401,
+    "request_id": "req-123"
+  }
+}
+```
 
 ## Security and Compliance Controls
 - Tenant-scoped access for job/status/audit/result endpoints.

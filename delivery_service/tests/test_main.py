@@ -1,13 +1,25 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
+import hashlib
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 
-from delivery_service.app.main import _delivery_id, _provider_names, _redact_payload, app, settings
-from delivery_service.app.models import DeliveryContext, DeliveryRequest
+from delivery_service.app.main import (
+    _delivery_id,
+    _provider_names,
+    _redact_payload,
+    _stable_json,
+    _webhook_envelope,
+    _webhook_event_id,
+    _webhook_headers,
+    app,
+    settings,
+)
+from delivery_service.app.models import DeliveryContext, DeliveryRequest, WebhookEventRequest
 from delivery_service.app.providers import WebhookProvider, build_provider
 
 
@@ -122,6 +134,150 @@ class DeliveryServiceTests(unittest.TestCase):
                 "job_id": "job-1",
                 "payload": {"invoice_number": "INV-001"},
                 "approval_status": "auto_approved",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["idempotent_replay"])
+
+    def test_webhook_event_id_uses_idempotency_key(self) -> None:
+        first = WebhookEventRequest(
+            event_type="document.completed",
+            tenant_id="tenant-a",
+            job_id="job-1",
+            idempotency_key="tenant-a:job-1:completed",
+            data={"status": "delivered"},
+        )
+        second = WebhookEventRequest(
+            event_type="document.completed",
+            tenant_id="tenant-a",
+            job_id="job-1",
+            idempotency_key="tenant-a:job-1:completed",
+            data={"status": "changed"},
+        )
+
+        self.assertEqual(_webhook_event_id(first), _webhook_event_id(second))
+        self.assertTrue(_webhook_event_id(first).startswith("evt-"))
+
+    def test_webhook_envelope_and_signature_headers(self) -> None:
+        request = WebhookEventRequest(
+            event_type="document.completed",
+            tenant_id="tenant-a",
+            job_id="job-1",
+            workflow_id="workflow-1",
+            occurred_at="2026-06-15T00:00:00+00:00",
+            data={"status": "delivered"},
+        )
+        envelope = _webhook_envelope(request, "evt-1")
+        body = _stable_json(envelope).encode("utf-8")
+
+        with patch.object(settings, "delivery_webhook_secret", "webhook-secret"):
+            headers = _webhook_headers("evt-1", envelope, body)
+
+        expected_signature = hmac.new(b"webhook-secret", body, hashlib.sha256).hexdigest()
+        self.assertEqual(envelope["schema_version"], "1.0")
+        self.assertEqual(envelope["tenant_id"], "tenant-a")
+        self.assertEqual(headers["Idempotency-Key"], "evt-1")
+        self.assertEqual(headers["X-IDP-Event-Type"], "document.completed")
+        self.assertEqual(headers["X-IDP-Signature-256"], f"sha256={expected_signature}")
+
+    @patch("delivery_service.app.main.upload_json")
+    @patch("delivery_service.app.main._persist_webhook_receipt")
+    @patch("delivery_service.app.main._load_webhook_receipt", return_value=None)
+    def test_webhook_event_without_destination_is_skipped(
+        self,
+        mocked_load_receipt,
+        mocked_persist_receipt,
+        mocked_upload_json,
+    ) -> None:
+        mocked_persist_receipt.return_value = (
+            "delivery-artifacts",
+            "jobs/job-1/webhooks/evt-1/receipt.json",
+        )
+        client = TestClient(app)
+
+        with patch.object(settings, "delivery_webhook_url", ""):
+            response = client.post(
+                "/webhooks/events",
+                json={
+                    "event_id": "evt-1",
+                    "event_type": "document.completed",
+                    "tenant_id": "tenant-a",
+                    "job_id": "job-1",
+                    "data": {"status": "delivered"},
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["webhook_status"], "skipped")
+        self.assertFalse(payload["idempotent_replay"])
+        mocked_persist_receipt.assert_called_once()
+        mocked_upload_json.assert_called_once()
+
+    @patch("delivery_service.app.main.upload_json")
+    @patch("delivery_service.app.main._persist_webhook_receipt")
+    @patch("delivery_service.app.main._send_webhook_event", new_callable=AsyncMock)
+    @patch("delivery_service.app.main._load_webhook_receipt", return_value=None)
+    def test_webhook_event_delivery_success(
+        self,
+        mocked_load_receipt,
+        mocked_send_webhook_event,
+        mocked_persist_receipt,
+        mocked_upload_json,
+    ) -> None:
+        mocked_send_webhook_event.return_value = {
+            "status": "success",
+            "status_code": 202,
+            "attempts": [{"attempt": 1, "status_code": 202, "success": True}],
+        }
+        mocked_persist_receipt.return_value = (
+            "delivery-artifacts",
+            "jobs/job-1/webhooks/evt-1/receipt.json",
+        )
+        client = TestClient(app)
+
+        with (
+            patch.object(settings, "delivery_webhook_url", "https://consumer.example.com/idp/webhooks"),
+            patch.object(settings, "delivery_webhook_secret", "webhook-secret"),
+        ):
+            response = client.post(
+                "/webhooks/events",
+                json={
+                    "event_id": "evt-1",
+                    "event_type": "document.completed",
+                    "tenant_id": "tenant-a",
+                    "job_id": "job-1",
+                    "workflow_id": "workflow-1",
+                    "data": {"status": "delivered"},
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["webhook_status"], "success")
+        mocked_send_webhook_event.assert_awaited_once()
+        mocked_persist_receipt.assert_called_once()
+        mocked_upload_json.assert_called_once()
+
+    @patch("delivery_service.app.main._load_webhook_receipt")
+    def test_webhook_success_receipt_returns_idempotent_replay(self, mocked_load_receipt) -> None:
+        mocked_load_receipt.return_value = {
+            "event_id": "evt-1",
+            "event_type": "document.completed",
+            "job_id": "job-1",
+            "tenant_id": "tenant-a",
+            "webhook_status": "success",
+            "webhook_receipt_key": "jobs/job-1/webhooks/evt-1/receipt.json",
+        }
+        client = TestClient(app)
+        response = client.post(
+            "/webhooks/events",
+            json={
+                "event_id": "evt-1",
+                "event_type": "document.completed",
+                "tenant_id": "tenant-a",
+                "job_id": "job-1",
+                "data": {"status": "delivered"},
             },
         )
 

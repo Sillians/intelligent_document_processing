@@ -12,6 +12,7 @@ from typing import Any
 
 import psycopg2
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from prometheus_client import Counter, Histogram
 from temporalio.client import Client
@@ -91,8 +92,11 @@ instrument_app(app, "ingestion_service")
 
 
 @app.middleware("http")
-async def security_headers_middleware(request, call_next):
+async def security_headers_middleware(request: Request, call_next):
+    request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+    request.state.request_id = request_id
     response = await call_next(request)
+    response.headers["X-Request-ID"] = request_id
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Cache-Control"] = "no-store"
@@ -251,16 +255,120 @@ async def _audit(
         )
 
 
+@app.get("/")
+async def api_root() -> dict[str, Any]:
+    return {
+        "service": "intelligent-document-processing-api",
+        "status": "ok",
+        "base_url_usage": "Use this gateway base URL with the public document endpoints.",
+        "endpoints": {
+            "health": "/health",
+            "submit_document": "POST /documents",
+            "poll_status": "GET /documents/{job_id}",
+            "fetch_result": "GET /documents/{job_id}/result",
+        },
+        "documentation": "infra/api/PUBLIC_API.md",
+    }
+
+
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+def _request_id(request: Request) -> str:
+    return getattr(request.state, "request_id", None) or request.headers.get("X-Request-ID") or str(uuid.uuid4())
+
+
+def _error_code(status_code: int, detail: Any) -> str:
+    if isinstance(detail, str) and detail:
+        cleaned = re.sub(r"[^a-z0-9]+", "_", detail.lower()).strip("_")
+        if cleaned:
+            return cleaned[:80]
+    return {
+        400: "bad_request",
+        401: "unauthorized",
+        403: "forbidden",
+        404: "not_found",
+        409: "conflict",
+        413: "payload_too_large",
+        415: "unsupported_media_type",
+        422: "validation_error",
+        429: "rate_limited",
+        500: "internal_server_error",
+        503: "service_unavailable",
+    }.get(status_code, "request_failed")
+
+
+def _error_message(detail: Any, default: str) -> str:
+    if isinstance(detail, str) and detail:
+        return detail
+    if isinstance(detail, list):
+        return default
+    if isinstance(detail, dict):
+        message = detail.get("message")
+        if isinstance(message, str) and message:
+            return message
+    return default
+
+
+def _error_response(
+    *,
+    request: Request,
+    status_code: int,
+    detail: Any,
+    default_message: str,
+    headers: dict[str, str] | None = None,
+) -> JSONResponse:
+    request_id = _request_id(request)
+    content: dict[str, Any] = {
+        "error": {
+            "code": _error_code(status_code, detail),
+            "message": _error_message(detail, default_message),
+            "status": status_code,
+            "request_id": request_id,
+        }
+    }
+    if isinstance(detail, (dict, list)):
+        content["error"]["details"] = detail
+
+    response_headers = {"X-Request-ID": request_id}
+    if headers:
+        response_headers.update(headers)
+    return JSONResponse(status_code=status_code, content=content, headers=response_headers)
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
+    return _error_response(
+        request=request,
+        status_code=exc.status_code,
+        detail=exc.detail,
+        default_message="Request failed",
+        headers=exc.headers,
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    return _error_response(
+        request=request,
+        status_code=422,
+        detail=exc.errors(),
+        default_message="Request validation failed",
+    )
 
 
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     logger.exception("Unhandled exception on path=%s", request.url.path, exc_info=exc)
     INGESTION_FAILURES.labels(type(exc).__name__).inc()
-    return JSONResponse(status_code=500, content={"detail": "Internal server error"})
+    return _error_response(
+        request=request,
+        status_code=500,
+        detail="Internal server error",
+        default_message="Internal server error",
+    )
 
 
 @app.post("/documents", response_model=DocumentSubmissionResponse)

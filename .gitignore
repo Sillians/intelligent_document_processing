@@ -43,6 +43,8 @@ htmlcov/
 .coverage
 .coverage.*
 .cache
+artifacts/e2e/
+artifacts/benchmarks/
 nosetests.xml
 coverage.xml
 *.cover
@@ -149,6 +151,9 @@ activemq-data/
 
 # Environments
 .env
+.env.production
+.env.local
+.env.*.local
 .envrc
 .venv
 env/

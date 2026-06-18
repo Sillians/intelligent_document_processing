@@ -68,15 +68,19 @@ def _prepare_grayscale(image: np.ndarray) -> np.ndarray:
     if image.ndim != 3 or image.shape[2] not in {3, 4}:
         raise ValueError(f"Unsupported image shape: {image.shape}")
     if image.shape[2] == 4:
-        image = cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
-    return cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        image = image[:, :, :3]
+    return np.clip(
+        (0.114 * image[:, :, 0]) + (0.587 * image[:, :, 1]) + (0.299 * image[:, :, 2]),
+        0,
+        255,
+    ).astype(np.uint8)
 
 
 def _normalize_to_bgr(image: np.ndarray) -> np.ndarray:
     if image.ndim == 2:
-        return cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+        return np.repeat(image[:, :, np.newaxis], 3, axis=2)
     if image.ndim == 3 and image.shape[2] == 4:
-        return cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
+        return image[:, :, :3]
     if image.ndim == 3 and image.shape[2] == 3:
         return image
     raise ValueError(f"Unsupported image shape: {image.shape}")

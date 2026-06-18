@@ -156,3 +156,8 @@ async def deliver_activity(payload: dict[str, Any]) -> dict[str, Any]:
 @activity.defn
 async def evaluate_activity(payload: dict[str, Any]) -> dict[str, Any]:
     return await _post("evaluate", f"{settings.evaluation_url}/track-run", payload)
+
+
+@activity.defn
+async def notify_webhook_activity(payload: dict[str, Any]) -> dict[str, Any]:
+    return await _post("webhook", f"{settings.delivery_url}/webhooks/events", payload)
