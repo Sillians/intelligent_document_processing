@@ -12,4 +12,6 @@ data/
 Notes/
 *.egg-info/
 .env
+.env.staging
+.env.production
 .DS_Store
