@@ -170,6 +170,22 @@ jobs:
           chmod 600 ~/.ssh/config
           ssh -F ~/.ssh/config -G "$STAGING_HOST" >/dev/null
 
+      - name: Verify staging SSH connection
+        env:
+          STAGING_HOST: ${{ secrets.STAGING_HOST }}
+          STAGING_USER: ${{ secrets.STAGING_USER }}
+          STAGING_PORT: ${{ secrets.STAGING_PORT || '22' }}
+        run: |
+          set -euo pipefail
+          echo "Verifying SSH config for ${STAGING_USER}@${STAGING_HOST}:${STAGING_PORT}."
+          ssh -F ~/.ssh/config -G "$STAGING_HOST" | grep -E '^(hostname|user|port|proxycommand|identityfile|userknownhostsfile|stricthostkeychecking) '
+          if ! ssh -F ~/.ssh/config -i ~/.ssh/id_staging -p "$STAGING_PORT" -o BatchMode=yes -o ConnectTimeout=30 "${STAGING_USER}@${STAGING_HOST}" \
+            "set -eu; echo connected-as=\$(whoami); command -v tar; mkdir -p '${STAGING_APP_DIR}/releases/${SOURCE_SHA}'; test -w '${STAGING_APP_DIR}/releases/${SOURCE_SHA}'"; then
+            echo "Unable to establish a non-interactive staging SSH session or prepare the release directory." >&2
+            echo "Check Cloudflare Access non-interactive auth, authorized_keys for STAGING_USER, and write permission for STAGING_APP_DIR." >&2
+            exit 1
+          fi
+
       - name: Upload deployment bundle
         env:
           STAGING_HOST: ${{ secrets.STAGING_HOST }}
