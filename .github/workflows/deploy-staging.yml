@@ -84,14 +84,43 @@ jobs:
             exit 1
           fi
 
+      - name: Install Cloudflare Client
+        env:
+          STAGING_USE_CLOUDFLARE: ${{ vars.STAGING_USE_CLOUDFLARE || 'false' }}
+        run: |
+          set -euo pipefail
+          case "${STAGING_USE_CLOUDFLARE}" in
+            true|TRUE|1|yes|YES|on|ON)
+              ;;
+            *)
+              echo "Skipping cloudflared install because STAGING_USE_CLOUDFLARE is not enabled."
+              exit 0
+              ;;
+          esac
+
+          curl --fail --location --show-error \
+            --output cloudflared.deb \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared.deb
+          cloudflared --version
+
       - name: Configure SSH
         env:
           STAGING_HOST: ${{ secrets.STAGING_HOST }}
+          STAGING_USER: ${{ secrets.STAGING_USER }}
           STAGING_PORT: ${{ secrets.STAGING_PORT || '22' }}
           STAGING_SSH_KEY: ${{ secrets.STAGING_SSH_KEY }}
           STAGING_KNOWN_HOSTS: ${{ secrets.STAGING_KNOWN_HOSTS }}
+          STAGING_USE_CLOUDFLARE: ${{ vars.STAGING_USE_CLOUDFLARE || 'false' }}
         run: |
           set -euo pipefail
+          use_cloudflare=false
+          case "${STAGING_USE_CLOUDFLARE}" in
+            true|TRUE|1|yes|YES|on|ON)
+              use_cloudflare=true
+              ;;
+          esac
+
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
           printf '%s\n' "$STAGING_SSH_KEY" > ~/.ssh/id_staging
@@ -103,6 +132,9 @@ jobs:
           if [ -n "$STAGING_KNOWN_HOSTS" ]; then
             echo "Using configured STAGING_KNOWN_HOSTS."
             printf '%s\n' "$STAGING_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          elif [ "$use_cloudflare" = true ]; then
+            echo "STAGING_KNOWN_HOSTS is required when STAGING_USE_CLOUDFLARE=true because ssh-keyscan cannot scan through Cloudflare Access." >&2
+            exit 1
           else
             echo "STAGING_KNOWN_HOSTS is not configured; scanning ${STAGING_HOST}:${STAGING_PORT}."
             if ! ssh-keyscan -T 10 -p "$STAGING_PORT" "$STAGING_HOST" >> ~/.ssh/known_hosts; then
@@ -116,6 +148,28 @@ jobs:
           fi
           chmod 600 ~/.ssh/known_hosts
 
+          {
+            echo "Host ${STAGING_HOST}"
+            echo "  HostName ${STAGING_HOST}"
+            echo "  User ${STAGING_USER}"
+            echo "  Port ${STAGING_PORT}"
+            echo "  IdentityFile ~/.ssh/id_staging"
+            echo "  IdentitiesOnly yes"
+            echo "  BatchMode yes"
+            echo "  StrictHostKeyChecking yes"
+            echo "  UserKnownHostsFile ~/.ssh/known_hosts"
+            if [ "$use_cloudflare" = true ]; then
+              cloudflared_path="$(command -v cloudflared || true)"
+              if [ -z "$cloudflared_path" ]; then
+                echo "cloudflared is required when STAGING_USE_CLOUDFLARE=true, but it is not installed." >&2
+                exit 1
+              fi
+              echo "  ProxyCommand ${cloudflared_path} access ssh --hostname %h"
+            fi
+          } > ~/.ssh/config
+          chmod 600 ~/.ssh/config
+          ssh -F ~/.ssh/config -G "$STAGING_HOST" >/dev/null
+
       - name: Upload deployment bundle
         env:
           STAGING_HOST: ${{ secrets.STAGING_HOST }}
@@ -123,7 +177,7 @@ jobs:
           STAGING_PORT: ${{ secrets.STAGING_PORT || '22' }}
         run: |
           set -euo pipefail
-          ssh -i ~/.ssh/id_staging -p "$STAGING_PORT" "${STAGING_USER}@${STAGING_HOST}" \
+          ssh -F ~/.ssh/config -i ~/.ssh/id_staging -p "$STAGING_PORT" -o BatchMode=yes "${STAGING_USER}@${STAGING_HOST}" \
             "mkdir -p '${STAGING_APP_DIR}/releases/${SOURCE_SHA}'"
           tar \
             --exclude='.git' \
@@ -131,7 +185,7 @@ jobs:
             --exclude='artifacts' \
             --exclude='data' \
             --exclude='__pycache__' \
-            -czf - . | ssh -i ~/.ssh/id_staging -p "$STAGING_PORT" "${STAGING_USER}@${STAGING_HOST}" \
+            -czf - . | ssh -F ~/.ssh/config -i ~/.ssh/id_staging -p "$STAGING_PORT" -o BatchMode=yes "${STAGING_USER}@${STAGING_HOST}" \
             "tar -xzf - -C '${STAGING_APP_DIR}/releases/${SOURCE_SHA}' && ln -sfn '${STAGING_APP_DIR}/releases/${SOURCE_SHA}' '${STAGING_APP_DIR}/current'"
 
       - name: Install staging env file
@@ -142,7 +196,7 @@ jobs:
           STAGING_ENV_FILE: ${{ secrets.STAGING_ENV_FILE }}
         run: |
           set -euo pipefail
-          printf '%s\n' "$STAGING_ENV_FILE" | ssh -i ~/.ssh/id_staging -p "$STAGING_PORT" "${STAGING_USER}@${STAGING_HOST}" \
+          printf '%s\n' "$STAGING_ENV_FILE" | ssh -F ~/.ssh/config -i ~/.ssh/id_staging -p "$STAGING_PORT" -o BatchMode=yes "${STAGING_USER}@${STAGING_HOST}" \
             "cat > '${STAGING_APP_DIR}/current/.env.staging.tmp' && chmod 600 '${STAGING_APP_DIR}/current/.env.staging.tmp' && mv '${STAGING_APP_DIR}/current/.env.staging.tmp' '${STAGING_APP_DIR}/current/.env.staging'"
 
       - name: Deploy services on staging
@@ -154,7 +208,7 @@ jobs:
           GHCR_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          ssh -i ~/.ssh/id_staging -p "$STAGING_PORT" "${STAGING_USER}@${STAGING_HOST}" \
+          ssh -F ~/.ssh/config -i ~/.ssh/id_staging -p "$STAGING_PORT" -o BatchMode=yes "${STAGING_USER}@${STAGING_HOST}" \
             "cd '${STAGING_APP_DIR}/current' && \
              echo '${GHCR_TOKEN}' | docker login ghcr.io -u '${GHCR_USERNAME}' --password-stdin && \
              export IDP_ENV_FILE=.env.staging && \
