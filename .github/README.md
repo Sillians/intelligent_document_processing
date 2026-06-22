@@ -207,7 +207,9 @@ Required GitHub environment/secrets for `staging`:
 
 **Optional staging configuration:**
 
-- environment variable `STAGING_APP_DIR`: local deploy path on the staging runner, defaults to `/opt/idp-staging`.
+- environment variable `STAGING_APP_DIR`: local deploy path on the staging
+  runner. Defaults to `$HOME/idp-staging` on macOS self-hosted runners and
+  `/opt/idp-staging` on Linux runners.
 - `STAGING_PUBLIC_BASE_URL`: public or local staging gateway URL for post-deploy smoke.
 - `STAGING_SMOKE_API_KEY`: API key used by post-deploy smoke.
 - environment variable `STAGING_TENANT_ID`: tenant for smoke tests, defaults to `default`.
@@ -228,7 +230,31 @@ STAGING_USE_CLOUDFLARE
 
 **Prepare the staging machine:**
 
-Create the deployment directory and give the runner user ownership. Replace
+Create the deployment directory and give the runner user ownership.
+
+For macOS with Docker Desktop, prefer a path under the runner user's home
+directory because Docker Desktop only bind-mounts files from shared host
+locations. The workflow default is `$HOME/idp-staging` on macOS.
+
+```bash
+mkdir -p "$HOME/idp-staging/releases"
+chmod -R u+rwX "$HOME/idp-staging"
+```
+
+If you override `STAGING_APP_DIR` to a path such as `/opt/idp-staging` on
+macOS, add that path in Docker Desktop:
+
+```text
+Docker Desktop -> Settings -> Resources -> File Sharing
+```
+
+Otherwise the deploy step can fail with:
+
+```text
+mounts denied: The path /opt/idp-staging/... is not shared from the host and is not known to Docker
+```
+
+For Linux runners, `/opt/idp-staging` is a reasonable default. Replace
 `github-runner` with the actual OS user running the GitHub Actions runner.
 
 ```bash
@@ -253,7 +279,7 @@ sudo usermod -aG docker github-runner
 ```
 
 For macOS with Docker Desktop, ensure Docker Desktop is running before the
-self-hosted runner starts.
+self-hosted runner starts and that `STAGING_APP_DIR` is inside a shared path.
 
 Release Candidate images are published for both `linux/amd64` and
 `linux/arm64` so Apple Silicon self-hosted staging runners can pull native
