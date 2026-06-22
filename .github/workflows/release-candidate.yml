@@ -25,6 +25,7 @@ concurrency:
 
 env:
   SOURCE_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+  RELEASE_PLATFORMS: linux/amd64,linux/arm64
 
 jobs:
   publish:
@@ -50,6 +51,9 @@ jobs:
           echo "IMAGE_NAMESPACE=${image_namespace}" >> "$GITHUB_ENV"
           echo "IMAGE_TAG=${image_tag}" >> "$GITHUB_ENV"
 
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -64,6 +68,7 @@ jobs:
         run: |
           docker buildx build \
             --push \
+            --platform "${RELEASE_PLATFORMS}" \
             --build-arg UV_GROUP=temporal \
             --label org.opencontainers.image.revision="${SOURCE_SHA}" \
             --tag "${IMAGE_NAMESPACE}/ingestion-service:${IMAGE_TAG}" \
@@ -74,6 +79,7 @@ jobs:
         run: |
           docker buildx build \
             --push \
+            --platform "${RELEASE_PLATFORMS}" \
             --build-arg UV_GROUP=orchestrator \
             --label org.opencontainers.image.revision="${SOURCE_SHA}" \
             --tag "${IMAGE_NAMESPACE}/workflow-orchestrator:${IMAGE_TAG}" \
@@ -84,6 +90,7 @@ jobs:
         run: |
           docker buildx build \
             --push \
+            --platform "${RELEASE_PLATFORMS}" \
             --build-arg UV_GROUP=base \
             --label org.opencontainers.image.revision="${SOURCE_SHA}" \
             --tag "${IMAGE_NAMESPACE}/delivery-service:${IMAGE_TAG}" \
@@ -99,6 +106,7 @@ jobs:
             "source_sha": "${SOURCE_SHA}",
             "image_namespace": "${IMAGE_NAMESPACE}",
             "image_tag": "${IMAGE_TAG}",
+            "platforms": "${RELEASE_PLATFORMS}",
             "images": {
               "ingestion-service": "${IMAGE_NAMESPACE}/ingestion-service:${IMAGE_TAG}",
               "workflow-orchestrator": "${IMAGE_NAMESPACE}/workflow-orchestrator:${IMAGE_TAG}",

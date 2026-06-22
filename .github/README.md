@@ -255,6 +255,10 @@ sudo usermod -aG docker github-runner
 For macOS with Docker Desktop, ensure Docker Desktop is running before the
 self-hosted runner starts.
 
+Release Candidate images are published for both `linux/amd64` and
+`linux/arm64` so Apple Silicon self-hosted staging runners can pull native
+images from GHCR.
+
 **Staging deployment behavior:**
 
 - copies the checked-out release into `${STAGING_APP_DIR}/releases/<sha>` on the self-hosted runner,
