@@ -179,30 +179,85 @@ It intentionally does not set a Compose project name. Production keeps the
 
 ## Staging CD
 
-Staging deploys assume the server has already been bootstrapped with Docker,
-Docker Compose, persistent volumes, and the non-updated infrastructure services.
+Staging deploys run on a self-hosted GitHub Actions runner installed on the
+staging machine. This avoids buying a public domain and avoids SSH/Cloudflare
+Access from GitHub-hosted runners.
+
+Register the runner under:
+
+```text
+GitHub repository -> Settings -> Actions -> Runners -> New self-hosted runner
+```
+
+Add a custom runner label:
+
+```text
+staging
+```
+
+The staging job uses:
+
+```yaml
+runs-on: [self-hosted, staging]
+```
 
 Required GitHub environment/secrets for `staging`:
 
-- `STAGING_HOST`: SSH host or IP.
-- `STAGING_USER`: SSH user.
-- `STAGING_SSH_KEY`: private SSH key for that user.
 - `STAGING_ENV_FILE`: complete `.env.staging` contents.
 
 **Optional staging configuration:**
 
-- `STAGING_PORT`: SSH port, defaults to `22`.
-- `STAGING_KNOWN_HOSTS`: pinned SSH known_hosts entry. If omitted, the workflow uses `ssh-keyscan`.
-- environment variable `STAGING_APP_DIR`: remote deploy path, defaults to `/opt/idp`.
-- `STAGING_PUBLIC_BASE_URL`: public staging gateway URL for post-deploy smoke.
+- environment variable `STAGING_APP_DIR`: local deploy path on the staging runner, defaults to `/opt/idp-staging`.
+- `STAGING_PUBLIC_BASE_URL`: public or local staging gateway URL for post-deploy smoke.
 - `STAGING_SMOKE_API_KEY`: API key used by post-deploy smoke.
 - environment variable `STAGING_TENANT_ID`: tenant for smoke tests, defaults to `default`.
 - `STAGING_PROMETHEUS_URL`: optional Prometheus URL. When present, smoke tests
   also require live IDP scrape targets.
 
+The following SSH/Cloudflare values are not required for the self-hosted staging
+path:
+
+```text
+STAGING_HOST
+STAGING_USER
+STAGING_PORT
+STAGING_SSH_KEY
+STAGING_KNOWN_HOSTS
+STAGING_USE_CLOUDFLARE
+```
+
+**Prepare the staging machine:**
+
+Create the deployment directory and give the runner user ownership. Replace
+`github-runner` with the actual OS user running the GitHub Actions runner.
+
+```bash
+sudo mkdir -p /opt/idp-staging/releases
+sudo chown -R github-runner:github-runner /opt/idp-staging
+chmod -R u+rwX /opt/idp-staging
+```
+
+Install and verify Docker Compose for the runner user:
+
+```bash
+docker version
+docker compose version
+docker ps
+```
+
+If `docker ps` fails with a permission error on Linux, add the runner user to
+the Docker group and restart the runner service:
+
+```bash
+sudo usermod -aG docker github-runner
+```
+
+For macOS with Docker Desktop, ensure Docker Desktop is running before the
+self-hosted runner starts.
+
 **Staging deployment behavior:**
 
-- uploads a source bundle to `${STAGING_APP_DIR}/releases/<sha>`,
+- copies the checked-out release into `${STAGING_APP_DIR}/releases/<sha>` on the self-hosted runner,
 - atomically updates `${STAGING_APP_DIR}/current`,
 - writes `.env.staging` from the encrypted GitHub secret,
 - logs in to GHCR with the workflow token,

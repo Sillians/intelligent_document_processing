@@ -29,7 +29,7 @@ env:
 jobs:
   deploy:
     name: Deploy release candidate to staging
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, staging]
     timeout-minutes: 20
     environment: staging
     if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
@@ -42,7 +42,7 @@ jobs:
 
       - name: Resolve deployment metadata
         env:
-          STAGING_APP_DIR: ${{ vars.STAGING_APP_DIR || '/opt/idp' }}
+          STAGING_APP_DIR: ${{ vars.STAGING_APP_DIR || '/opt/idp-staging' }}
         run: |
           set -euo pipefail
           image_namespace="ghcr.io/${GITHUB_REPOSITORY,,}"
@@ -58,22 +58,10 @@ jobs:
 
       - name: Validate staging secrets
         env:
-          STAGING_HOST: ${{ secrets.STAGING_HOST }}
-          STAGING_USER: ${{ secrets.STAGING_USER }}
-          STAGING_SSH_KEY: ${{ secrets.STAGING_SSH_KEY }}
           STAGING_ENV_FILE: ${{ secrets.STAGING_ENV_FILE }}
         run: |
           set -euo pipefail
           missing=()
-          if [ -z "$STAGING_HOST" ]; then
-            missing+=("STAGING_HOST")
-          fi
-          if [ -z "$STAGING_USER" ]; then
-            missing+=("STAGING_USER")
-          fi
-          if [ -z "$STAGING_SSH_KEY" ]; then
-            missing+=("STAGING_SSH_KEY")
-          fi
           if [ -z "$STAGING_ENV_FILE" ]; then
             missing+=("STAGING_ENV_FILE")
           fi
@@ -84,156 +72,55 @@ jobs:
             exit 1
           fi
 
-      - name: Install Cloudflare Client
+      - name: Prepare local release on staging runner
         env:
-          STAGING_USE_CLOUDFLARE: ${{ vars.STAGING_USE_CLOUDFLARE || 'false' }}
+          STAGING_ENV_FILE: ${{ secrets.STAGING_ENV_FILE }}
         run: |
           set -euo pipefail
-          case "${STAGING_USE_CLOUDFLARE}" in
-            true|TRUE|1|yes|YES|on|ON)
-              ;;
-            *)
-              echo "Skipping cloudflared install because STAGING_USE_CLOUDFLARE is not enabled."
-              exit 0
-              ;;
-          esac
+          release_dir="${STAGING_APP_DIR}/releases/${SOURCE_SHA}"
+          current_link="${STAGING_APP_DIR}/current"
 
-          curl --fail --location --show-error \
-            --output cloudflared.deb \
-            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
-          sudo dpkg -i cloudflared.deb
-          cloudflared --version
-
-      - name: Configure SSH
-        env:
-          STAGING_HOST: ${{ secrets.STAGING_HOST }}
-          STAGING_USER: ${{ secrets.STAGING_USER }}
-          STAGING_PORT: ${{ secrets.STAGING_PORT || '22' }}
-          STAGING_SSH_KEY: ${{ secrets.STAGING_SSH_KEY }}
-          STAGING_KNOWN_HOSTS: ${{ secrets.STAGING_KNOWN_HOSTS }}
-          STAGING_USE_CLOUDFLARE: ${{ vars.STAGING_USE_CLOUDFLARE || 'false' }}
-        run: |
-          set -euo pipefail
-          use_cloudflare=false
-          case "${STAGING_USE_CLOUDFLARE}" in
-            true|TRUE|1|yes|YES|on|ON)
-              use_cloudflare=true
-              ;;
-          esac
-
-          mkdir -p ~/.ssh
-          chmod 700 ~/.ssh
-          printf '%s\n' "$STAGING_SSH_KEY" > ~/.ssh/id_staging
-          chmod 600 ~/.ssh/id_staging
-          if ! ssh-keygen -y -f ~/.ssh/id_staging >/dev/null 2>&1; then
-            echo "STAGING_SSH_KEY is not a valid private key. Store the full private key, including BEGIN/END lines, as the staging environment secret." >&2
+          if [ -z "$STAGING_APP_DIR" ] || [ "$STAGING_APP_DIR" = "/" ]; then
+            echo "Refusing to deploy with unsafe STAGING_APP_DIR='${STAGING_APP_DIR}'." >&2
             exit 1
           fi
-          if [ -n "$STAGING_KNOWN_HOSTS" ]; then
-            echo "Using configured STAGING_KNOWN_HOSTS."
-            printf '%s\n' "$STAGING_KNOWN_HOSTS" > ~/.ssh/known_hosts
-          elif [ "$use_cloudflare" = true ]; then
-            echo "STAGING_KNOWN_HOSTS is required when STAGING_USE_CLOUDFLARE=true because ssh-keyscan cannot scan through Cloudflare Access." >&2
-            exit 1
-          else
-            echo "STAGING_KNOWN_HOSTS is not configured; scanning ${STAGING_HOST}:${STAGING_PORT}."
-            if ! ssh-keyscan -T 10 -p "$STAGING_PORT" "$STAGING_HOST" >> ~/.ssh/known_hosts; then
-              echo "Unable to scan SSH host key for ${STAGING_HOST}:${STAGING_PORT}. Verify STAGING_HOST/STAGING_PORT are reachable from GitHub-hosted runners, or set STAGING_KNOWN_HOSTS explicitly." >&2
-              exit 1
-            fi
-          fi
-          if [ ! -s ~/.ssh/known_hosts ]; then
-            echo "known_hosts is empty. Set STAGING_KNOWN_HOSTS to the verified ssh-keyscan output for the staging host." >&2
-            exit 1
-          fi
-          chmod 600 ~/.ssh/known_hosts
-
-          {
-            echo "Host ${STAGING_HOST}"
-            echo "  HostName ${STAGING_HOST}"
-            echo "  User ${STAGING_USER}"
-            echo "  Port ${STAGING_PORT}"
-            echo "  IdentityFile ~/.ssh/id_staging"
-            echo "  IdentitiesOnly yes"
-            echo "  BatchMode yes"
-            echo "  StrictHostKeyChecking yes"
-            echo "  UserKnownHostsFile ~/.ssh/known_hosts"
-            if [ "$use_cloudflare" = true ]; then
-              cloudflared_path="$(command -v cloudflared || true)"
-              if [ -z "$cloudflared_path" ]; then
-                echo "cloudflared is required when STAGING_USE_CLOUDFLARE=true, but it is not installed." >&2
-                exit 1
-              fi
-              echo "  ProxyCommand ${cloudflared_path} access ssh --hostname %h"
-            fi
-          } > ~/.ssh/config
-          chmod 600 ~/.ssh/config
-          ssh -F ~/.ssh/config -G "$STAGING_HOST" >/dev/null
-
-      - name: Verify staging SSH connection
-        env:
-          STAGING_HOST: ${{ secrets.STAGING_HOST }}
-          STAGING_USER: ${{ secrets.STAGING_USER }}
-          STAGING_PORT: ${{ secrets.STAGING_PORT || '22' }}
-        run: |
-          set -euo pipefail
-          echo "Verifying SSH config for ${STAGING_USER}@${STAGING_HOST}:${STAGING_PORT}."
-          ssh -F ~/.ssh/config -G "$STAGING_HOST" | grep -E '^(hostname|user|port|proxycommand|identityfile|userknownhostsfile|stricthostkeychecking) '
-          if ! ssh -F ~/.ssh/config -i ~/.ssh/id_staging -p "$STAGING_PORT" -o BatchMode=yes -o ConnectTimeout=30 "${STAGING_USER}@${STAGING_HOST}" \
-            "set -eu; echo connected-as=\$(whoami); command -v tar; mkdir -p '${STAGING_APP_DIR}/releases/${SOURCE_SHA}'; test -w '${STAGING_APP_DIR}/releases/${SOURCE_SHA}'"; then
-            echo "Unable to establish a non-interactive staging SSH session or prepare the release directory." >&2
-            echo "Check Cloudflare Access non-interactive auth, authorized_keys for STAGING_USER, and write permission for STAGING_APP_DIR." >&2
+          rm -rf "$release_dir"
+          if ! mkdir -p "$release_dir"; then
+            echo "Unable to create ${release_dir}. Ensure the self-hosted runner user owns ${STAGING_APP_DIR}." >&2
             exit 1
           fi
 
-      - name: Upload deployment bundle
-        env:
-          STAGING_HOST: ${{ secrets.STAGING_HOST }}
-          STAGING_USER: ${{ secrets.STAGING_USER }}
-          STAGING_PORT: ${{ secrets.STAGING_PORT || '22' }}
-        run: |
-          set -euo pipefail
-          ssh -F ~/.ssh/config -i ~/.ssh/id_staging -p "$STAGING_PORT" -o BatchMode=yes "${STAGING_USER}@${STAGING_HOST}" \
-            "mkdir -p '${STAGING_APP_DIR}/releases/${SOURCE_SHA}'"
           tar \
             --exclude='.git' \
             --exclude='.venv' \
             --exclude='artifacts' \
             --exclude='data' \
+            --exclude='.env' \
+            --exclude='.env.*' \
+            --exclude='id_ed25519*' \
+            --exclude='id_rsa*' \
             --exclude='__pycache__' \
-            -czf - . | ssh -F ~/.ssh/config -i ~/.ssh/id_staging -p "$STAGING_PORT" -o BatchMode=yes "${STAGING_USER}@${STAGING_HOST}" \
-            "tar -xzf - -C '${STAGING_APP_DIR}/releases/${SOURCE_SHA}' && ln -sfn '${STAGING_APP_DIR}/releases/${SOURCE_SHA}' '${STAGING_APP_DIR}/current'"
-
-      - name: Install staging env file
-        env:
-          STAGING_HOST: ${{ secrets.STAGING_HOST }}
-          STAGING_USER: ${{ secrets.STAGING_USER }}
-          STAGING_PORT: ${{ secrets.STAGING_PORT || '22' }}
-          STAGING_ENV_FILE: ${{ secrets.STAGING_ENV_FILE }}
-        run: |
-          set -euo pipefail
-          printf '%s\n' "$STAGING_ENV_FILE" | ssh -F ~/.ssh/config -i ~/.ssh/id_staging -p "$STAGING_PORT" -o BatchMode=yes "${STAGING_USER}@${STAGING_HOST}" \
-            "cat > '${STAGING_APP_DIR}/current/.env.staging.tmp' && chmod 600 '${STAGING_APP_DIR}/current/.env.staging.tmp' && mv '${STAGING_APP_DIR}/current/.env.staging.tmp' '${STAGING_APP_DIR}/current/.env.staging'"
+            -czf - . | tar -xzf - -C "$release_dir"
+          ln -sfn "$release_dir" "$current_link"
+          printf '%s\n' "$STAGING_ENV_FILE" > "${current_link}/.env.staging.tmp"
+          chmod 600 "${current_link}/.env.staging.tmp"
+          mv "${current_link}/.env.staging.tmp" "${current_link}/.env.staging"
 
       - name: Deploy services on staging
         env:
-          STAGING_HOST: ${{ secrets.STAGING_HOST }}
-          STAGING_USER: ${{ secrets.STAGING_USER }}
-          STAGING_PORT: ${{ secrets.STAGING_PORT || '22' }}
           GHCR_USERNAME: ${{ github.actor }}
           GHCR_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          ssh -F ~/.ssh/config -i ~/.ssh/id_staging -p "$STAGING_PORT" -o BatchMode=yes "${STAGING_USER}@${STAGING_HOST}" \
-            "cd '${STAGING_APP_DIR}/current' && \
-             echo '${GHCR_TOKEN}' | docker login ghcr.io -u '${GHCR_USERNAME}' --password-stdin && \
-             export IDP_ENV_FILE=.env.staging && \
-             export IDP_IMAGE_REGISTRY='${IMAGE_NAMESPACE}' && \
-             export IDP_IMAGE_TAG='${IMAGE_TAG}' && \
-             docker compose --env-file .env.staging -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.staging.yml config --quiet && \
-             docker compose --env-file .env.staging -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.staging.yml pull ingestion-service workflow-orchestrator delivery-service && \
-             docker compose --env-file .env.staging -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.staging.yml up -d --no-build --no-deps gateway ingestion-service workflow-orchestrator delivery-service && \
-             docker compose --env-file .env.staging -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.staging.yml ps gateway ingestion-service workflow-orchestrator delivery-service"
+          cd "${STAGING_APP_DIR}/current"
+          echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${GHCR_USERNAME}" --password-stdin
+          export IDP_ENV_FILE=.env.staging
+          export IDP_IMAGE_REGISTRY="${IMAGE_NAMESPACE}"
+          export IDP_IMAGE_TAG="${IMAGE_TAG}"
+          docker compose --env-file .env.staging -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.staging.yml config --quiet
+          docker compose --env-file .env.staging -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.staging.yml pull ingestion-service workflow-orchestrator delivery-service
+          docker compose --env-file .env.staging -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.staging.yml up -d --no-build --no-deps gateway ingestion-service workflow-orchestrator delivery-service
+          docker compose --env-file .env.staging -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.staging.yml ps gateway ingestion-service workflow-orchestrator delivery-service
 
       - name: Run post-deploy staging smoke
         env:
