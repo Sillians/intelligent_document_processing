@@ -307,11 +307,18 @@ images from GHCR.
 - copies the checked-out release into `${STAGING_APP_DIR}/releases/<sha>` on the self-hosted runner,
 - atomically updates `${STAGING_APP_DIR}/current`,
 - writes `.env.staging` from the encrypted GitHub secret,
-- logs in to GHCR with the workflow token,
+- writes a temporary Docker GHCR auth config using the workflow token,
 - validates Compose config,
 - pulls the three release-candidate images,
-- restarts only `gateway`, `ingestion-service`, `workflow-orchestrator`, and
-  `delivery-service` with `--no-build --no-deps`.
+- starts required infra dependencies: `postgres`, `seaweedfs`, and `temporal`,
+- starts `gateway` and `ingestion-service`, then waits for
+  `ingestion-service` health before starting downstream workers,
+- starts `workflow-orchestrator` and `delivery-service` from release images.
+
+The staging overlay keeps infra dependency ports internal-only, so local
+developer services on ports such as `5432`, `7233`, `8333`, or `6379` do not
+collide with the staging stack. The externally exposed staging entrypoint is
+the gateway port from `GATEWAY_HTTP_HOST_PORT` / `GATEWAY_HTTPS_HOST_PORT`.
 - runs post-deploy smoke when staging URL and API key secrets are configured,
   then uploads the smoke artifacts.
 

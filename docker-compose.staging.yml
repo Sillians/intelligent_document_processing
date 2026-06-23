@@ -1,6 +1,21 @@
 name: idp-staging-stack
 
 services:
+  postgres:
+    ports: !reset []
+
+  redis:
+    ports: !reset []
+
+  seaweedfs:
+    ports: !reset []
+
+  temporal:
+    ports: !reset []
+
+  temporal-ui:
+    ports: !reset []
+
   ingestion-service:
     image: ${IDP_IMAGE_REGISTRY:?set IDP_IMAGE_REGISTRY}/ingestion-service:${IDP_IMAGE_TAG:?set IDP_IMAGE_TAG}
 

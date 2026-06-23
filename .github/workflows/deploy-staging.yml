@@ -149,8 +149,31 @@ jobs:
 
           docker compose --env-file .env.staging -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.staging.yml config --quiet
           docker compose --env-file .env.staging -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.staging.yml pull ingestion-service workflow-orchestrator delivery-service
-          docker compose --env-file .env.staging -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.staging.yml up -d --no-build --no-deps gateway ingestion-service workflow-orchestrator delivery-service
-          docker compose --env-file .env.staging -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.staging.yml ps gateway ingestion-service workflow-orchestrator delivery-service
+          docker compose --env-file .env.staging -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.staging.yml up -d --no-build postgres seaweedfs temporal gateway
+          docker compose --env-file .env.staging -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.staging.yml up -d --no-build ingestion-service
+
+          ingestion_container="$(docker compose --env-file .env.staging -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.staging.yml ps -q ingestion-service)"
+          for attempt in $(seq 1 30); do
+            ingestion_health="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "${ingestion_container}")"
+            if [ "${ingestion_health}" = "healthy" ]; then
+              break
+            fi
+            if [ "${ingestion_health}" = "unhealthy" ]; then
+              echo "ingestion-service became unhealthy while waiting for startup." >&2
+              docker logs --tail=200 "${ingestion_container}" >&2 || true
+              exit 1
+            fi
+            echo "Waiting for ingestion-service health (${attempt}/30): ${ingestion_health}"
+            sleep 5
+          done
+          if [ "${ingestion_health}" != "healthy" ]; then
+            echo "ingestion-service did not become healthy before timeout." >&2
+            docker logs --tail=200 "${ingestion_container}" >&2 || true
+            exit 1
+          fi
+
+          docker compose --env-file .env.staging -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.staging.yml up -d --no-build --no-deps workflow-orchestrator delivery-service
+          docker compose --env-file .env.staging -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.staging.yml ps postgres seaweedfs temporal gateway ingestion-service workflow-orchestrator delivery-service
 
       - name: Run post-deploy staging smoke
         env:
