@@ -36,14 +36,28 @@ File: `.github/workflows/release-candidate.yml`
 - Successful `IDP CI` runs on `main`.
 - Manual `workflow_dispatch` runs.
 
-This workflow publishes immutable, SHA-tagged gateway-facing images to GHCR:
+This workflow publishes immutable, SHA-tagged staging release images to GHCR:
 
 - `ghcr.io/<owner>/<repo>/ingestion-service:<sha>`
 - `ghcr.io/<owner>/<repo>/workflow-orchestrator:<sha>`
+- `ghcr.io/<owner>/<repo>/preprocess-worker:<sha>`
+- `ghcr.io/<owner>/<repo>/ocr-service:<sha>`
+- `ghcr.io/<owner>/<repo>/layout-service:<sha>`
+- `ghcr.io/<owner>/<repo>/classifier-router-service:<sha>`
+- `ghcr.io/<owner>/<repo>/extraction-service:<sha>`
+- `ghcr.io/<owner>/<repo>/validation-service:<sha>`
+- `ghcr.io/<owner>/<repo>/human-review-console:<sha>`
 - `ghcr.io/<owner>/<repo>/delivery-service:<sha>`
+- `ghcr.io/<owner>/<repo>/evaluation-service:<sha>`
+- `ghcr.io/<owner>/<repo>/mlflow:<sha>`
 
 It also updates the moving `staging-candidate` tag for each image and uploads a
 small release-candidate manifest artifact.
+
+Release-candidate images are currently published as `linux/amd64`. This is
+intentional for staging because PaddleOCR, LayoutParser, Torch, and related OCR
+dependencies are more deterministic on amd64. Apple Silicon staging runners can
+run these images through Docker Desktop emulation.
 
 ### Deploy Staging
 
@@ -160,13 +174,28 @@ The staging Compose overlay is:
 docker-compose.staging.yml
 ```
 
-It points `ingestion-service`, `workflow-orchestrator`, and `delivery-service`
-at release-candidate images through:
+It points the functional pipeline services at release-candidate images through:
 
 ```text
 IDP_IMAGE_REGISTRY
 IDP_IMAGE_TAG
 ```
+
+The staging deploy pulls and starts:
+
+- `postgres`, `redis`, `seaweedfs`, `temporal`, `gateway`, `mlflow`, and `label-studio`.
+- `ingestion-service`, `workflow-orchestrator`, `preprocess-worker`, `ocr-service`, `layout-service`, `classifier-router-service`, `extraction-service`, `validation-service`, `human-review-console`, `delivery-service`, and `evaluation-service`.
+
+The deploy creates missing Postgres databases for reused staging volumes:
+
+- the configured `POSTGRES_DB`,
+- `temporal`,
+- `temporal_visibility`,
+- `mlflow`,
+- `labelstudio`.
+
+It then waits for all HTTP application services to become healthy before running
+the post-deploy full-pipeline smoke test.
 
 The production release image overlay is:
 
@@ -225,6 +254,22 @@ GATEWAY_HTTP_HOST_PORT=8089
 - environment variable `STAGING_TENANT_ID`: tenant for smoke tests, defaults to `default`.
 - `STAGING_PROMETHEUS_URL`: optional Prometheus URL. When present, smoke tests
   also require live IDP scrape targets.
+
+For the local self-hosted staging runner path, do not use placeholder domains
+such as `https://staging-idp.example.com`. Use the gateway port exposed on the
+runner host:
+
+```text
+STAGING_PUBLIC_BASE_URL=http://127.0.0.1:8081
+```
+
+Leave `STAGING_PROMETHEUS_URL` unset unless the staging deploy also starts a
+reachable Prometheus instance. If observability is running locally, set it to
+the reachable local URL, for example:
+
+```text
+STAGING_PROMETHEUS_URL=http://127.0.0.1:9090
+```
 
 The following SSH/Cloudflare values are not required for the self-hosted staging
 path:

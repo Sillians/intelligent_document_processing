@@ -16,11 +16,56 @@ services:
   temporal-ui:
     ports: !reset []
 
+  label-studio:
+    ports: !reset []
+
+  mlflow:
+    image: ${IDP_IMAGE_REGISTRY:?set IDP_IMAGE_REGISTRY}/mlflow:${IDP_IMAGE_TAG:?set IDP_IMAGE_TAG}
+    platform: linux/amd64
+    ports: !reset []
+
   ingestion-service:
     image: ${IDP_IMAGE_REGISTRY:?set IDP_IMAGE_REGISTRY}/ingestion-service:${IDP_IMAGE_TAG:?set IDP_IMAGE_TAG}
+    platform: linux/amd64
 
   workflow-orchestrator:
     image: ${IDP_IMAGE_REGISTRY:?set IDP_IMAGE_REGISTRY}/workflow-orchestrator:${IDP_IMAGE_TAG:?set IDP_IMAGE_TAG}
+    platform: linux/amd64
+
+  preprocess-worker:
+    image: ${IDP_IMAGE_REGISTRY:?set IDP_IMAGE_REGISTRY}/preprocess-worker:${IDP_IMAGE_TAG:?set IDP_IMAGE_TAG}
+    platform: linux/amd64
+
+  ocr-service:
+    image: ${IDP_IMAGE_REGISTRY:?set IDP_IMAGE_REGISTRY}/ocr-service:${IDP_IMAGE_TAG:?set IDP_IMAGE_TAG}
+    platform: linux/amd64
+
+  layout-service:
+    image: ${IDP_IMAGE_REGISTRY:?set IDP_IMAGE_REGISTRY}/layout-service:${IDP_IMAGE_TAG:?set IDP_IMAGE_TAG}
+    platform: linux/amd64
+
+  classifier-router-service:
+    image: ${IDP_IMAGE_REGISTRY:?set IDP_IMAGE_REGISTRY}/classifier-router-service:${IDP_IMAGE_TAG:?set IDP_IMAGE_TAG}
+    platform: linux/amd64
+
+  extraction-service:
+    image: ${IDP_IMAGE_REGISTRY:?set IDP_IMAGE_REGISTRY}/extraction-service:${IDP_IMAGE_TAG:?set IDP_IMAGE_TAG}
+    platform: linux/amd64
+
+  validation-service:
+    image: ${IDP_IMAGE_REGISTRY:?set IDP_IMAGE_REGISTRY}/validation-service:${IDP_IMAGE_TAG:?set IDP_IMAGE_TAG}
+    platform: linux/amd64
+
+  human-review-console:
+    image: ${IDP_IMAGE_REGISTRY:?set IDP_IMAGE_REGISTRY}/human-review-console:${IDP_IMAGE_TAG:?set IDP_IMAGE_TAG}
+    platform: linux/amd64
+    ports: !reset []
 
   delivery-service:
     image: ${IDP_IMAGE_REGISTRY:?set IDP_IMAGE_REGISTRY}/delivery-service:${IDP_IMAGE_TAG:?set IDP_IMAGE_TAG}
+    platform: linux/amd64
+
+  evaluation-service:
+    image: ${IDP_IMAGE_REGISTRY:?set IDP_IMAGE_REGISTRY}/evaluation-service:${IDP_IMAGE_TAG:?set IDP_IMAGE_TAG}
+    platform: linux/amd64
+    ports: !reset []

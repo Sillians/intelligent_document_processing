@@ -25,13 +25,13 @@ concurrency:
 
 env:
   SOURCE_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
-  RELEASE_PLATFORMS: linux/amd64,linux/arm64
+  RELEASE_PLATFORMS: linux/amd64
 
 jobs:
   publish:
     name: Publish release candidate images
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
 
     steps:
@@ -64,56 +64,119 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ github.token }}
 
-      - name: Build and push ingestion-service
+      - name: Build and push release images
         run: |
-          docker buildx build \
-            --push \
-            --platform "${RELEASE_PLATFORMS}" \
-            --build-arg UV_GROUP=temporal \
-            --label org.opencontainers.image.revision="${SOURCE_SHA}" \
-            --tag "${IMAGE_NAMESPACE}/ingestion-service:${IMAGE_TAG}" \
-            --tag "${IMAGE_NAMESPACE}/ingestion-service:staging-candidate" \
-            -f docker/python-service.Dockerfile .
+          set -euo pipefail
+          services=(
+            ingestion-service
+            workflow-orchestrator
+            preprocess-worker
+            ocr-service
+            layout-service
+            classifier-router-service
+            extraction-service
+            validation-service
+            human-review-console
+            delivery-service
+            evaluation-service
+            mlflow
+          )
+          groups=(
+            temporal
+            orchestrator
+            preprocess
+            ocr
+            layout
+            base
+            extraction
+            base
+            base
+            base
+            evaluation
+            base
+          )
+          dockerfiles=(
+            docker/python-service.Dockerfile
+            docker/python-service.Dockerfile
+            docker/python-service.Dockerfile
+            docker/python-service.Dockerfile
+            docker/python-service.Dockerfile
+            docker/python-service.Dockerfile
+            docker/python-service.Dockerfile
+            docker/python-service.Dockerfile
+            docker/python-service.Dockerfile
+            docker/python-service.Dockerfile
+            docker/python-service.Dockerfile
+            docker/mlflow.Dockerfile
+          )
+          extra_apt=(
+            ""
+            ""
+            "libglib2.0-0 libgl1 libsm6 libxext6 libxrender1"
+            "libglib2.0-0 libgl1 libsm6 libxext6 libxrender1"
+            "libglib2.0-0 libgl1 libsm6 libxext6 libxrender1"
+            ""
+            ""
+            ""
+            ""
+            ""
+            ""
+            ""
+          )
 
-      - name: Build and push workflow-orchestrator
-        run: |
-          docker buildx build \
-            --push \
-            --platform "${RELEASE_PLATFORMS}" \
-            --build-arg UV_GROUP=orchestrator \
-            --label org.opencontainers.image.revision="${SOURCE_SHA}" \
-            --tag "${IMAGE_NAMESPACE}/workflow-orchestrator:${IMAGE_TAG}" \
-            --tag "${IMAGE_NAMESPACE}/workflow-orchestrator:staging-candidate" \
-            -f docker/python-service.Dockerfile .
-
-      - name: Build and push delivery-service
-        run: |
-          docker buildx build \
-            --push \
-            --platform "${RELEASE_PLATFORMS}" \
-            --build-arg UV_GROUP=base \
-            --label org.opencontainers.image.revision="${SOURCE_SHA}" \
-            --tag "${IMAGE_NAMESPACE}/delivery-service:${IMAGE_TAG}" \
-            --tag "${IMAGE_NAMESPACE}/delivery-service:staging-candidate" \
-            -f docker/python-service.Dockerfile .
+          for i in "${!services[@]}"; do
+            service="${services[$i]}"
+            build_args=(--build-arg "UV_GROUP=${groups[$i]}")
+            if [ -n "${extra_apt[$i]}" ]; then
+              build_args+=(--build-arg "EXTRA_APT_PACKAGES=${extra_apt[$i]}")
+            fi
+            echo "Building ${service} for ${RELEASE_PLATFORMS}"
+            docker buildx build \
+              --push \
+              --platform "${RELEASE_PLATFORMS}" \
+              "${build_args[@]}" \
+              --label org.opencontainers.image.revision="${SOURCE_SHA}" \
+              --tag "${IMAGE_NAMESPACE}/${service}:${IMAGE_TAG}" \
+              --tag "${IMAGE_NAMESPACE}/${service}:staging-candidate" \
+              -f "${dockerfiles[$i]}" .
+          done
 
       - name: Write release candidate manifest
         run: |
           set -euo pipefail
           mkdir -p artifacts/release-candidate
-          cat > artifacts/release-candidate/manifest.json <<JSON
+          services=(
+            ingestion-service
+            workflow-orchestrator
+            preprocess-worker
+            ocr-service
+            layout-service
+            classifier-router-service
+            extraction-service
+            validation-service
+            human-review-console
+            delivery-service
+            evaluation-service
+            mlflow
+          )
           {
-            "source_sha": "${SOURCE_SHA}",
-            "image_namespace": "${IMAGE_NAMESPACE}",
-            "image_tag": "${IMAGE_TAG}",
-            "platforms": "${RELEASE_PLATFORMS}",
-            "images": {
-              "ingestion-service": "${IMAGE_NAMESPACE}/ingestion-service:${IMAGE_TAG}",
-              "workflow-orchestrator": "${IMAGE_NAMESPACE}/workflow-orchestrator:${IMAGE_TAG}",
-              "delivery-service": "${IMAGE_NAMESPACE}/delivery-service:${IMAGE_TAG}"
-            }
-          }
-          JSON
+            printf '{\n'
+            printf '  "source_sha": "%s",\n' "${SOURCE_SHA}"
+            printf '  "image_namespace": "%s",\n' "${IMAGE_NAMESPACE}"
+            printf '  "image_tag": "%s",\n' "${IMAGE_TAG}"
+            printf '  "platforms": "%s",\n' "${RELEASE_PLATFORMS}"
+            printf '  "images": {\n'
+            for i in "${!services[@]}"; do
+              service="${services[$i]}"
+              comma=","
+              if [ "$i" -eq "$((${#services[@]} - 1))" ]; then
+                comma=""
+              fi
+              printf '    "%s": "%s/%s:%s"%s\n' "${service}" "${IMAGE_NAMESPACE}" "${service}" "${IMAGE_TAG}" "${comma}"
+            done
+            printf '  }\n'
+            printf '}\n'
+          } > artifacts/release-candidate/manifest.json
 
       - name: Upload release candidate manifest
         uses: actions/upload-artifact@v4
