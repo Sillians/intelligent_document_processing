@@ -160,11 +160,17 @@ jobs:
           postgres_user="${postgres_user:-idp}"
           postgres_db="${postgres_db:-idp}"
           echo "Ensuring staging Postgres database exists: ${postgres_db}"
-          docker compose --env-file .env.staging -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.staging.yml exec -T postgres \
-            psql -U "${postgres_user}" -d postgres -v db="${postgres_db}" <<'SQL'
-          SELECT 'CREATE DATABASE ' || quote_ident(:'db')
-          WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = :'db')\gexec
-SQL
+          case "${postgres_db}" in
+            *[!A-Za-z0-9_]* | "")
+              echo "POSTGRES_DB must contain only letters, numbers, and underscores for automated staging creation." >&2
+              exit 1
+              ;;
+          esac
+          if ! docker compose --env-file .env.staging -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.staging.yml exec -T postgres \
+            psql -U "${postgres_user}" -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname = '${postgres_db}'" | grep -q 1; then
+            docker compose --env-file .env.staging -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.staging.yml exec -T postgres \
+              psql -U "${postgres_user}" -d postgres -c "CREATE DATABASE \"${postgres_db}\""
+          fi
 
           docker compose --env-file .env.staging -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.staging.yml up -d --no-build ingestion-service
 
