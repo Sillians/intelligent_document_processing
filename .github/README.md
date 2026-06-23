@@ -205,6 +205,16 @@ Required GitHub environment/secrets for `staging`:
 
 - `STAGING_ENV_FILE`: complete `.env.staging` contents.
 
+When changing staging values such as `GATEWAY_HTTP_HOST_PORT`, update the
+GitHub `STAGING_ENV_FILE` secret with the full new `.env.staging` contents.
+Changing only the local `.env.staging` file does not affect GitHub Actions.
+For example, if a local development stack already uses `8081`, set this inside
+the GitHub secret:
+
+```text
+GATEWAY_HTTP_HOST_PORT=8089
+```
+
 **Optional staging configuration:**
 
 - environment variable `STAGING_APP_DIR`: local deploy path on the staging

@@ -129,6 +129,24 @@ jobs:
           export IDP_ENV_FILE=.env.staging
           export IDP_IMAGE_REGISTRY="${IMAGE_NAMESPACE}"
           export IDP_IMAGE_TAG="${IMAGE_TAG}"
+
+          gateway_http_bind="$(awk -F= '$1 == "GATEWAY_HTTP_BIND" {gsub(/[[:space:]"]/, "", $2); print $2}' .env.staging | tail -n 1)"
+          gateway_http_host_port="$(awk -F= '$1 == "GATEWAY_HTTP_HOST_PORT" {gsub(/[[:space:]"]/, "", $2); print $2}' .env.staging | tail -n 1)"
+          gateway_https_bind="$(awk -F= '$1 == "GATEWAY_HTTPS_BIND" {gsub(/[[:space:]"]/, "", $2); print $2}' .env.staging | tail -n 1)"
+          gateway_https_host_port="$(awk -F= '$1 == "GATEWAY_HTTPS_HOST_PORT" {gsub(/[[:space:]"]/, "", $2); print $2}' .env.staging | tail -n 1)"
+          gateway_http_bind="${gateway_http_bind:-0.0.0.0}"
+          gateway_http_host_port="${gateway_http_host_port:-8081}"
+          gateway_https_bind="${gateway_https_bind:-0.0.0.0}"
+          gateway_https_host_port="${gateway_https_host_port:-8443}"
+          echo "Staging gateway ports: http=${gateway_http_bind}:${gateway_http_host_port}->8081 https=${gateway_https_bind}:${gateway_https_host_port}->8443"
+
+          if command -v lsof >/dev/null 2>&1 && lsof -nP -iTCP:"${gateway_http_host_port}" -sTCP:LISTEN >/dev/null 2>&1; then
+            echo "Host port ${gateway_http_host_port} is already allocated before staging deploy." >&2
+            echo "Update GATEWAY_HTTP_HOST_PORT inside the GitHub STAGING_ENV_FILE secret, not only the local .env.staging file." >&2
+            lsof -nP -iTCP:"${gateway_http_host_port}" -sTCP:LISTEN >&2 || true
+            exit 1
+          fi
+
           docker compose --env-file .env.staging -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.staging.yml config --quiet
           docker compose --env-file .env.staging -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.staging.yml pull ingestion-service workflow-orchestrator delivery-service
           docker compose --env-file .env.staging -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.staging.yml up -d --no-build --no-deps gateway ingestion-service workflow-orchestrator delivery-service
