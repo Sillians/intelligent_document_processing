@@ -141,10 +141,14 @@ jobs:
           echo "Staging gateway ports: http=${gateway_http_bind}:${gateway_http_host_port}->8081 https=${gateway_https_bind}:${gateway_https_host_port}->8443"
 
           if command -v lsof >/dev/null 2>&1 && lsof -nP -iTCP:"${gateway_http_host_port}" -sTCP:LISTEN >/dev/null 2>&1; then
-            echo "Host port ${gateway_http_host_port} is already allocated before staging deploy." >&2
-            echo "Update GATEWAY_HTTP_HOST_PORT inside the GitHub STAGING_ENV_FILE secret, not only the local .env.staging file." >&2
-            lsof -nP -iTCP:"${gateway_http_host_port}" -sTCP:LISTEN >&2 || true
-            exit 1
+            if docker ps --format '{{.Names}} {{.Ports}}' | grep -E "idp-staging-stack-gateway-1 .*:${gateway_http_host_port}->8081/tcp" >/dev/null 2>&1; then
+              echo "Host port ${gateway_http_host_port} is already owned by the existing staging gateway; continuing with redeploy."
+            else
+              echo "Host port ${gateway_http_host_port} is already allocated before staging deploy." >&2
+              echo "Stop the conflicting process/container, or update GATEWAY_HTTP_HOST_PORT inside the GitHub STAGING_ENV_FILE secret." >&2
+              lsof -nP -iTCP:"${gateway_http_host_port}" -sTCP:LISTEN >&2 || true
+              exit 1
+            fi
           fi
 
           docker compose --env-file .env.staging -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.staging.yml config --quiet
