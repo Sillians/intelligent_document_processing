@@ -280,6 +280,13 @@ sudo usermod -aG docker github-runner
 
 For macOS with Docker Desktop, ensure Docker Desktop is running before the
 self-hosted runner starts and that `STAGING_APP_DIR` is inside a shared path.
+The workflow uses a temporary `DOCKER_CONFIG` during GHCR login so Docker does
+not try to write credentials into the macOS Keychain. Without that isolation,
+non-interactive runner jobs can fail with:
+
+```text
+error saving credentials: error storing credentials - err: exit status 1, out: `User interaction is not allowed. (-25308)`
+```
 
 Release Candidate images are published for both `linux/amd64` and
 `linux/arm64` so Apple Silicon self-hosted staging runners can pull native
