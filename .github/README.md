@@ -54,10 +54,19 @@ This workflow publishes immutable, SHA-tagged staging release images to GHCR:
 It also updates the moving `staging-candidate` tag for each image and uploads a
 small release-candidate manifest artifact.
 
-Release-candidate images are currently published as `linux/amd64`. This is
-intentional for staging because PaddleOCR, LayoutParser, Torch, and related OCR
-dependencies are more deterministic on amd64. Apple Silicon staging runners can
-run these images through Docker Desktop emulation.
+Release-candidate images are currently published as `linux/amd64`. For staging,
+`ocr-service` and `layout-service` use the lightweight OpenCV/preprocess
+dependency profile instead of shipping the full PaddleOCR, Torch, and
+LayoutParser runtimes. The service contracts still run end to end:
+
+- `ocr-service` is forced to deterministic fallback mode in
+  `docker-compose.staging.yml`.
+- `layout-service` uses its built-in heuristic backend when LayoutParser /
+  Detectron2 is unavailable.
+
+This keeps the local Apple Silicon staging runner practical. Full PaddleOCR and
+Detectron2 images should be reserved for a larger production-grade runner or a
+dedicated heavyweight staging profile.
 
 ### Deploy Staging
 
@@ -273,11 +282,9 @@ STAGING_PROMETHEUS_URL=http://127.0.0.1:9090
 
 **Docker Desktop storage for full-pipeline staging:**
 
-The OCR and layout images are large because they include OpenCV, PaddleOCR,
-Torch/LayoutParser dependencies, and model-capable Python environments. On a
-macOS self-hosted runner, Docker Desktop stores these layers inside its own
-Linux VM disk under paths such as `/var/lib/desktop-containerd`. A deploy can
-fail even when macOS still has free disk space:
+Docker Desktop stores image layers inside its own Linux VM disk under paths such
+as `/var/lib/desktop-containerd`. A deploy can fail even when macOS still has
+free disk space:
 
 ```text
 no space left on device
@@ -299,8 +306,9 @@ If cleanup is not enough, increase Docker Desktop's virtual disk limit:
 Docker Desktop -> Settings -> Resources -> Advanced -> Virtual disk limit
 ```
 
-For the full IDP pipeline, budget at least `80GB` for Docker Desktop while the
-OCR/layout image optimization work is still in progress.
+For the lightweight staging profile, budget at least `40GB` for Docker Desktop.
+If you switch staging back to full PaddleOCR/LayoutParser images, budget at
+least `80GB` because individual ML runtime layers can exceed `5GB`.
 
 The following SSH/Cloudflare values are not required for the self-hosted staging
 path:
@@ -374,9 +382,10 @@ credential helper, which can fail in non-interactive runner jobs with:
 error saving credentials: error storing credentials - err: exit status 1, out: `User interaction is not allowed. (-25308)`
 ```
 
-Release Candidate images are published for both `linux/amd64` and
-`linux/arm64` so Apple Silicon self-hosted staging runners can pull native
-images from GHCR.
+Release Candidate images are published for `linux/amd64`. Docker Desktop on
+Apple Silicon can run them through emulation. The staging OCR/layout images are
+kept lightweight to avoid pulling multi-gigabyte PaddleOCR/Torch layers during
+local staging deploys.
 
 **Staging deployment behavior:**
 
@@ -385,12 +394,15 @@ images from GHCR.
 - writes `.env.staging` from the encrypted GitHub secret,
 - writes a temporary Docker GHCR auth config using the workflow token,
 - validates Compose config,
-- pulls the three release-candidate images,
-- starts required infra dependencies: `postgres`, `seaweedfs`, and `temporal`,
-- ensures the configured `POSTGRES_DB` exists in the staging Postgres instance,
-- starts `gateway` and `ingestion-service`, then waits for
-  `ingestion-service` health before starting downstream workers,
-- starts `workflow-orchestrator` and `delivery-service` from release images.
+- prunes stopped containers, Docker build cache, and unused images unless
+  `STAGING_DOCKER_PRUNE_BEFORE_PULL=false`,
+- pulls the full functional release-candidate image set,
+- starts required infra dependencies: `postgres`, `redis`, `seaweedfs`,
+  `gateway`, `temporal`, `mlflow`, and `label-studio`,
+- ensures the configured `POSTGRES_DB`, `temporal`, `temporal_visibility`,
+  `mlflow`, and `labelstudio` databases exist in the staging Postgres instance,
+- starts all application services and waits for HTTP service health,
+- runs the full-pipeline smoke through the staging gateway.
 
 The staging overlay keeps infra dependency ports internal-only, so local
 developer services on ports such as `5432`, `7233`, `8333`, or `6379` do not

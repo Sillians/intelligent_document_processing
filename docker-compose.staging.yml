@@ -39,6 +39,8 @@ services:
   ocr-service:
     image: ${IDP_IMAGE_REGISTRY:?set IDP_IMAGE_REGISTRY}/ocr-service:${IDP_IMAGE_TAG:?set IDP_IMAGE_TAG}
     platform: linux/amd64
+    environment:
+      OCR_FORCE_FALLBACK: "true"
 
   layout-service:
     image: ${IDP_IMAGE_REGISTRY:?set IDP_IMAGE_REGISTRY}/layout-service:${IDP_IMAGE_TAG:?set IDP_IMAGE_TAG}

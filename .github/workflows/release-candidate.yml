@@ -85,8 +85,8 @@ jobs:
             temporal
             orchestrator
             preprocess
-            ocr
-            layout
+            preprocess
+            preprocess
             base
             extraction
             base
