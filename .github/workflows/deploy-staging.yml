@@ -124,8 +124,8 @@ jobs:
           cd "${STAGING_APP_DIR}/current"
           export DOCKER_CONFIG="${RUNNER_TEMP}/docker-config"
           mkdir -p "${DOCKER_CONFIG}"
-          printf '{"auths":{}}\n' > "${DOCKER_CONFIG}/config.json"
-          echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${GHCR_USERNAME}" --password-stdin
+          ghcr_auth="$(printf '%s:%s' "${GHCR_USERNAME}" "${GHCR_TOKEN}" | base64 | tr -d '\n')"
+          printf '{"auths":{"ghcr.io":{"auth":"%s"}}}\n' "${ghcr_auth}" > "${DOCKER_CONFIG}/config.json"
           export IDP_ENV_FILE=.env.staging
           export IDP_IMAGE_REGISTRY="${IMAGE_NAMESPACE}"
           export IDP_IMAGE_TAG="${IMAGE_TAG}"
