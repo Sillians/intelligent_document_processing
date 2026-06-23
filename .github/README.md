@@ -271,6 +271,37 @@ the reachable local URL, for example:
 STAGING_PROMETHEUS_URL=http://127.0.0.1:9090
 ```
 
+**Docker Desktop storage for full-pipeline staging:**
+
+The OCR and layout images are large because they include OpenCV, PaddleOCR,
+Torch/LayoutParser dependencies, and model-capable Python environments. On a
+macOS self-hosted runner, Docker Desktop stores these layers inside its own
+Linux VM disk under paths such as `/var/lib/desktop-containerd`. A deploy can
+fail even when macOS still has free disk space:
+
+```text
+no space left on device
+failed to extract layer ... /var/lib/desktop-containerd/...
+```
+
+The staging workflow prunes stopped containers, build cache, and unused images
+before pulling release images. It does not prune volumes, so staging Postgres,
+SeaweedFS, MLflow, and Label Studio data are preserved. To disable this cleanup,
+set the GitHub staging environment variable:
+
+```text
+STAGING_DOCKER_PRUNE_BEFORE_PULL=false
+```
+
+If cleanup is not enough, increase Docker Desktop's virtual disk limit:
+
+```text
+Docker Desktop -> Settings -> Resources -> Advanced -> Virtual disk limit
+```
+
+For the full IDP pipeline, budget at least `80GB` for Docker Desktop while the
+OCR/layout image optimization work is still in progress.
+
 The following SSH/Cloudflare values are not required for the self-hosted staging
 path:
 

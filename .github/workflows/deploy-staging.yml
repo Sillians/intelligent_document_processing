@@ -119,6 +119,7 @@ jobs:
         env:
           GHCR_USERNAME: ${{ github.actor }}
           GHCR_TOKEN: ${{ github.token }}
+          STAGING_DOCKER_PRUNE_BEFORE_PULL: ${{ vars.STAGING_DOCKER_PRUNE_BEFORE_PULL || 'true' }}
         run: |
           set -euo pipefail
           cd "${STAGING_APP_DIR}/current"
@@ -194,6 +195,19 @@ jobs:
           )
 
           "${compose[@]}" config --quiet
+          echo "Docker storage before release image cleanup:"
+          docker system df || true
+          df -h || true
+          if [ "${STAGING_DOCKER_PRUNE_BEFORE_PULL}" = "true" ]; then
+            echo "Pruning stopped containers, build cache, and unused images before pulling large OCR/layout images."
+            docker container prune -f || true
+            docker builder prune -af || true
+            docker image prune -af || true
+          else
+            echo "Skipping Docker cleanup because STAGING_DOCKER_PRUNE_BEFORE_PULL=${STAGING_DOCKER_PRUNE_BEFORE_PULL}."
+          fi
+          echo "Docker storage after release image cleanup:"
+          docker system df || true
           "${compose[@]}" pull "${release_services[@]}"
           "${compose[@]}" up -d --no-build postgres redis seaweedfs gateway
 
