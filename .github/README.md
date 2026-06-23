@@ -311,6 +311,7 @@ images from GHCR.
 - validates Compose config,
 - pulls the three release-candidate images,
 - starts required infra dependencies: `postgres`, `seaweedfs`, and `temporal`,
+- ensures the configured `POSTGRES_DB` exists in the staging Postgres instance,
 - starts `gateway` and `ingestion-service`, then waits for
   `ingestion-service` health before starting downstream workers,
 - starts `workflow-orchestrator` and `delivery-service` from release images.

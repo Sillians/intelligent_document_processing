@@ -24,14 +24,14 @@ services:
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-idp}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-idp_password}
-      POSTGRES_DB: idp
+      POSTGRES_DB: ${POSTGRES_DB:-idp}
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./infra/postgres/init:/docker-entrypoint-initdb.d
     ports:
       - "${POSTGRES_BIND:-0.0.0.0}:${POSTGRES_HOST_PORT:-5432}:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d idp"]
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 10s
       timeout: 5s
       retries: 10
