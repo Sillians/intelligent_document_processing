@@ -155,4 +155,4 @@ jobs:
             --tag "${image}" \
             -f docker/python-service.Dockerfile .
           docker run --rm "${image}" python -c \
-            "import cv2, pytesseract; image=cv2.imread('/app/samples/documents/sample_invoice_001.png'); text=pytesseract.image_to_string(image, lang='eng', config='--oem 1 --psm 3'); assert 'INVOICE' in text.upper(), text"
+            "import cv2, pytesseract, re; image=cv2.imread('/app/samples/documents/sample_invoice_001.png'); assert image is not None, 'sample invoice did not load'; text=pytesseract.image_to_string(image, lang='eng', config='--oem 1 --psm 3'); tokens=set(re.findall(r'[A-Z0-9]+', text.upper())); anchors={'ACME', 'SUPPLY', 'OCR', 'PIPELINE', 'TOTAL'}; matched=tokens & anchors; assert len(text.strip()) >= 100 and len(matched) >= 3, f'matched anchors={sorted(matched)}\\n{text}'"
