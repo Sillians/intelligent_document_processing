@@ -38,9 +38,10 @@ services:
 
   ocr-service:
     image: ${IDP_IMAGE_REGISTRY:?set IDP_IMAGE_REGISTRY}/ocr-service:${IDP_IMAGE_TAG:?set IDP_IMAGE_TAG}
-    platform: linux/amd64
+    platform: !reset null
     environment:
-      OCR_FORCE_FALLBACK: "true"
+      OCR_BACKEND: ${OCR_BACKEND:-tesseract}
+      OCR_FORCE_FALLBACK: ${OCR_FORCE_FALLBACK:-false}
 
   layout-service:
     image: ${IDP_IMAGE_REGISTRY:?set IDP_IMAGE_REGISTRY}/layout-service:${IDP_IMAGE_TAG:?set IDP_IMAGE_TAG}
@@ -62,6 +63,8 @@ services:
     image: ${IDP_IMAGE_REGISTRY:?set IDP_IMAGE_REGISTRY}/human-review-console:${IDP_IMAGE_TAG:?set IDP_IMAGE_TAG}
     platform: linux/amd64
     ports: !reset []
+    environment:
+      REVIEW_PROVIDER: ${STAGING_REVIEW_PROVIDER:-label_studio}
 
   delivery-service:
     image: ${IDP_IMAGE_REGISTRY:?set IDP_IMAGE_REGISTRY}/delivery-service:${IDP_IMAGE_TAG:?set IDP_IMAGE_TAG}

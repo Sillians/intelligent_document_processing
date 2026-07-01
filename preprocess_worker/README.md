@@ -50,6 +50,8 @@ Enhance document images to improve OCR quality and downstream model accuracy.
 - `PREPROCESS_ENABLE_THRESHOLD`
 - `PREPROCESS_MEDIAN_BLUR_KERNEL`
 - `PREPROCESS_DESKEW_MIN_FOREGROUND_PIXELS`
+- `PREPROCESS_DESKEW_MAX_ANGLE` (default `15`; larger estimated corrections are
+  rejected rather than rotating the page destructively)
 - `PREPROCESS_REQUEST_TIMEOUT_SECONDS`
 - `PREPROCESS_MAX_INFLIGHT_REQUESTS`
 
@@ -98,3 +100,6 @@ Run tests:
 - 2026-05-21: Documentation sync update to reflect current service naming and cross-service ingestion contract expectations. No runtime code changes were applied to this service in this update.
 - 2026-05-27: Implemented production-grade OpenCV preprocessing pipeline with robust skew estimation, configurable thresholding/denoise controls, safe fallback behavior, and unit tests.
 - 2026-06-01: Added bounded worker-pool execution, lifespan shutdown, richer preprocessing metadata, configurable CLAHE/deskew/threshold/blur controls, retryable busy/timeout errors, and expanded unit tests.
+- 2026-07-01: Corrected OpenCV rectangle-angle normalization, switched skew
+  points to `(x, y)` coordinates, bounded deskew correction to 15 degrees by
+  default, and added upright/skewed/implausible-angle regression tests.

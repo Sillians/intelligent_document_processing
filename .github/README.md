@@ -54,15 +54,21 @@ This workflow publishes immutable, SHA-tagged staging release images to GHCR:
 It also updates the moving `staging-candidate` tag for each image and uploads a
 small release-candidate manifest artifact.
 
-Release-candidate images are currently published as `linux/amd64`. For staging,
-`ocr-service` and `layout-service` use the lightweight OpenCV/preprocess
-dependency profile instead of shipping the full PaddleOCR, Torch, and
-LayoutParser runtimes. The service contracts still run end to end:
+Release-candidate images are published as `linux/amd64`, except
+`ocr-service`, which is published for `linux/amd64` and `linux/arm64` so the
+Apple Silicon staging runner can use a native CPU image. For staging,
+`ocr-service` uses the compact Tesseract dependency profile and
+`layout-service` uses the lightweight OpenCV/preprocess profile instead of
+shipping the full PaddleOCR, Torch, and LayoutParser runtimes:
 
-- `ocr-service` is forced to deterministic fallback mode in
-  `docker-compose.staging.yml`.
+- `ocr-service` runs real CPU OCR with `OCR_BACKEND=tesseract` and
+  `OCR_FORCE_FALLBACK=false`.
 - `layout-service` uses its built-in heuristic backend when LayoutParser /
   Detectron2 is unavailable.
+
+The push CI Docker smoke builds the CPU OCR image and runs Tesseract against the
+sample invoice. The OCR container health check uses `/ready`, so a missing
+Tesseract binary or failed engine initialization prevents staging deployment.
 
 This keeps the local Apple Silicon staging runner practical. Full PaddleOCR and
 Detectron2 images should be reserved for a larger production-grade runner or a
@@ -203,6 +209,11 @@ The deploy creates missing Postgres databases for reused staging volumes:
 - `mlflow`,
 - `labelstudio`.
 
+After application health checks, deployment calls
+`human-review-console /health/provider`. When Label Studio is selected, this
+must authenticate successfully and resolve `LABEL_STUDIO_PROJECT_ID`; otherwise
+deployment fails with both integration and Label Studio logs.
+
 It then waits for all HTTP application services to become healthy before running
 the post-deploy full-pipeline smoke test.
 
@@ -252,6 +263,24 @@ the GitHub secret:
 ```text
 GATEWAY_HTTP_HOST_PORT=8089
 ```
+
+The CPU OCR, bounded deskew, and Label Studio integration profile requires
+these values inside `STAGING_ENV_FILE`:
+
+```text
+PREPROCESS_DESKEW_MAX_ANGLE=15.0
+OCR_BACKEND=tesseract
+OCR_FORCE_FALLBACK=false
+OCR_TESSERACT_OEM=1
+OCR_TESSERACT_PSM=3
+LABEL_STUDIO_ENABLE_LEGACY_API_TOKEN=true
+LABEL_STUDIO_AUTH_SCHEME=token
+STAGING_REVIEW_PROVIDER=label_studio
+```
+
+Use `LABEL_STUDIO_AUTH_SCHEME=pat` instead when
+`LABEL_STUDIO_TOKEN` is a personal access token rather than the bootstrapped
+legacy `LABEL_STUDIO_USER_TOKEN`.
 
 **Optional staging configuration:**
 

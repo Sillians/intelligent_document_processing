@@ -74,6 +74,7 @@ class Settings(BaseSettings):
     label_studio_url: str = "http://label-studio:8080"
     label_studio_token: str = ""
     label_studio_project_id: int = 1
+    label_studio_auth_scheme: str = "token"
 
     mlflow_tracking_uri: str = "http://mlflow:5000"
 
@@ -88,6 +89,7 @@ class Settings(BaseSettings):
     preprocess_enable_threshold: bool = True
     preprocess_median_blur_kernel: int = Field(default=3, ge=1, le=31)
     preprocess_deskew_min_foreground_pixels: int = Field(default=64, ge=0)
+    preprocess_deskew_max_angle: float = Field(default=15.0, ge=0.0, le=45.0)
     preprocess_request_timeout_seconds: int = Field(default=60, ge=1)
     preprocess_max_inflight_requests: int = Field(default=4, ge=1, le=32)
     layout_model_config: str = "lp://PubLayNet/faster_rcnn_R_50_FPN_3x/config"
@@ -147,7 +149,10 @@ class Settings(BaseSettings):
     evaluation_fail_when_all_providers_fail: bool = False
     ocr_disable_mkldnn: bool = True
     ocr_language: str = "en"
+    ocr_backend: str = "paddle"
     ocr_force_fallback: bool = False
+    ocr_tesseract_oem: int = Field(default=1, ge=0, le=3)
+    ocr_tesseract_psm: int = Field(default=3, ge=0, le=13)
     ocr_engine_timeout_seconds: int = Field(default=60, ge=1)
     ocr_engine_lock_timeout_seconds: float = Field(default=1.5, gt=0)
     ocr_request_timeout_seconds: int = Field(default=90, ge=1)

@@ -26,6 +26,7 @@ concurrency:
 env:
   SOURCE_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
   RELEASE_PLATFORMS: linux/amd64
+  OCR_RELEASE_PLATFORMS: linux/amd64,linux/arm64
 
 jobs:
   publish:
@@ -85,7 +86,7 @@ jobs:
             temporal
             orchestrator
             preprocess
-            preprocess
+            ocr-cpu
             preprocess
             base
             extraction
@@ -113,7 +114,7 @@ jobs:
             ""
             ""
             "libglib2.0-0 libgl1 libsm6 libxext6 libxrender1"
-            "libglib2.0-0 libgl1 libsm6 libxext6 libxrender1"
+            "libglib2.0-0 libgl1 libsm6 libxext6 libxrender1 tesseract-ocr tesseract-ocr-eng"
             "libglib2.0-0 libgl1 libsm6 libxext6 libxrender1"
             ""
             ""
@@ -130,10 +131,14 @@ jobs:
             if [ -n "${extra_apt[$i]}" ]; then
               build_args+=(--build-arg "EXTRA_APT_PACKAGES=${extra_apt[$i]}")
             fi
-            echo "Building ${service} for ${RELEASE_PLATFORMS}"
+            build_platforms="${RELEASE_PLATFORMS}"
+            if [ "${service}" = "ocr-service" ]; then
+              build_platforms="${OCR_RELEASE_PLATFORMS}"
+            fi
+            echo "Building ${service} for ${build_platforms}"
             docker buildx build \
               --push \
-              --platform "${RELEASE_PLATFORMS}" \
+              --platform "${build_platforms}" \
               "${build_args[@]}" \
               --label org.opencontainers.image.revision="${SOURCE_SHA}" \
               --tag "${IMAGE_NAMESPACE}/${service}:${IMAGE_TAG}" \
@@ -165,6 +170,7 @@ jobs:
             printf '  "image_namespace": "%s",\n' "${IMAGE_NAMESPACE}"
             printf '  "image_tag": "%s",\n' "${IMAGE_TAG}"
             printf '  "platforms": "%s",\n' "${RELEASE_PLATFORMS}"
+            printf '  "ocr_platforms": "%s",\n' "${OCR_RELEASE_PLATFORMS}"
             printf '  "images": {\n'
             for i in "${!services[@]}"; do
               service="${services[$i]}"

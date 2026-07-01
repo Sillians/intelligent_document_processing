@@ -98,16 +98,31 @@ def _resize_if_needed(image: np.ndarray, *, max_dimension: int) -> tuple[np.ndar
     return resized, scale
 
 
-def _estimate_skew_angle(gray: np.ndarray, *, min_foreground_pixels: int) -> float:
+def _estimate_skew_angle(
+    gray: np.ndarray,
+    *,
+    min_foreground_pixels: int,
+    max_correction_degrees: float = 15.0,
+) -> float:
     _, mask = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    coords = np.column_stack(np.where(mask > 0))
-    if coords.shape[0] < min_foreground_pixels:
+    points = cv2.findNonZero(mask)
+    if points is None or len(points) < min_foreground_pixels:
         return 0.0
-    angle = cv2.minAreaRect(coords)[-1]
-    if angle < -45.0:
-        angle = 90.0 + angle
-    angle = -float(angle)
-    return max(-45.0, min(45.0, angle))
+
+    # OpenCV 4 reports rectangle angles in [0, 90]; older builds may report
+    # [-90, 0). Normalize both conventions to the smallest corrective rotation.
+    raw_angle = float(cv2.minAreaRect(points)[-1])
+    if raw_angle < -45.0:
+        correction = 90.0 + raw_angle
+    elif raw_angle > 45.0:
+        correction = raw_angle - 90.0
+    else:
+        correction = raw_angle
+
+    max_correction = max(0.0, min(45.0, float(max_correction_degrees)))
+    if abs(correction) > max_correction:
+        return 0.0
+    return correction
 
 
 def _rotate(image: np.ndarray, angle: float) -> np.ndarray:
@@ -154,6 +169,7 @@ def preprocess_image(
     threshold_c: int,
     enable_clahe: bool,
     min_foreground_pixels: int,
+    max_deskew_angle: float = 15.0,
     enable_deskew: bool = True,
     enable_threshold: bool = True,
     median_blur_kernel: int = 3,
@@ -178,7 +194,11 @@ def preprocess_image(
     foreground_pixels = _foreground_pixel_count(working)
     angle = 0.0
     if enable_deskew:
-        angle = _estimate_skew_angle(working, min_foreground_pixels=max(0, min_foreground_pixels))
+        angle = _estimate_skew_angle(
+            working,
+            min_foreground_pixels=max(0, min_foreground_pixels),
+            max_correction_degrees=max_deskew_angle,
+        )
         working = _rotate(working, angle) if not math.isclose(angle, 0.0, abs_tol=0.25) else working
         steps.append("deskew" if not math.isclose(angle, 0.0, abs_tol=0.25) else "deskew_skipped")
 
@@ -210,6 +230,7 @@ def preprocess_image(
         "width": int(result.shape[1]),
         "height": int(result.shape[0]),
         "foreground_pixels": foreground_pixels,
+        "deskew_max_angle": round(float(max_deskew_angle), 4),
         "threshold_block_size": block_size,
         "median_blur_kernel": blur_kernel,
         "pipeline": steps,
@@ -247,6 +268,7 @@ def _preprocess_sync(request: PreprocessRequest) -> dict[str, Any]:
                 threshold_c=int(getattr(settings, "preprocess_threshold_c", 11)),
                 enable_clahe=bool(getattr(settings, "preprocess_enable_clahe", True)),
                 min_foreground_pixels=int(getattr(settings, "preprocess_deskew_min_foreground_pixels", 64)),
+                max_deskew_angle=float(getattr(settings, "preprocess_deskew_max_angle", 15.0)),
                 enable_deskew=bool(getattr(settings, "preprocess_enable_deskew", True)),
                 enable_threshold=bool(getattr(settings, "preprocess_enable_threshold", True)),
                 median_blur_kernel=int(getattr(settings, "preprocess_median_blur_kernel", 3)),

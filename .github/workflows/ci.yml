@@ -49,7 +49,7 @@ jobs:
         run: >
           uv sync --frozen --no-default-groups
           --group temporal
-          --group preprocess
+          --group ocr-cpu
           --group extraction
           --group evaluation
           --group research
@@ -144,3 +144,15 @@ jobs:
         env:
           IDP_ENV_FILE: ${{ env.CI_ENV_FILE }}
         run: docker compose --env-file "${CI_ENV_FILE}" build ingestion-service workflow-orchestrator delivery-service
+
+      - name: Build and exercise CPU OCR image
+        run: |
+          set -euo pipefail
+          image="idp-ocr-cpu-ci:${GITHUB_SHA}"
+          docker build \
+            --build-arg UV_GROUP=ocr-cpu \
+            --build-arg "EXTRA_APT_PACKAGES=libglib2.0-0 libgl1 libsm6 libxext6 libxrender1 tesseract-ocr tesseract-ocr-eng" \
+            --tag "${image}" \
+            -f docker/python-service.Dockerfile .
+          docker run --rm "${image}" python -c \
+            "import cv2, pytesseract; image=cv2.imread('/app/samples/documents/sample_invoice_001.png'); text=pytesseract.image_to_string(image, lang='eng', config='--oem 1 --psm 3'); assert 'INVOICE' in text.upper(), text"

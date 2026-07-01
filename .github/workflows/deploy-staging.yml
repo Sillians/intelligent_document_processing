@@ -271,6 +271,24 @@ jobs:
             wait_for_healthy "${service}"
           done
 
+          provider_health_url="http://localhost:8016/health/provider"
+          provider_ready=false
+          for attempt in $(seq 1 30); do
+            if "${compose[@]}" exec -T human-review-console python -c \
+              "import urllib.request; urllib.request.urlopen('${provider_health_url}', timeout=10).read()"; then
+              provider_ready=true
+              echo "Human-review provider verification passed."
+              break
+            fi
+            echo "Waiting for human-review provider verification (${attempt}/30)."
+            sleep 5
+          done
+          if [ "${provider_ready}" != "true" ]; then
+            echo "Human-review provider verification failed." >&2
+            "${compose[@]}" logs --tail=200 human-review-console label-studio >&2 || true
+            exit 1
+          fi
+
           "${compose[@]}" ps postgres redis seaweedfs temporal gateway mlflow label-studio "${app_services[@]}"
 
       - name: Run post-deploy staging smoke

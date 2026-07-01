@@ -14,6 +14,7 @@ from human_review_console.app.main import (
     build_review_task_id,
     derive_priority,
     extract_label_studio_task_ref,
+    label_studio_auth_mode,
     settings,
 )
 
@@ -67,16 +68,17 @@ class HumanReviewConsoleTests(unittest.TestCase):
 
     @patch("human_review_console.app.main.upload_json")
     def test_create_review_task_uses_local_queue_without_label_studio_token(self, mocked_upload_json) -> None:
-        client = TestClient(app)
-        response = client.post(
-            "/review/tasks",
-            json={
-                "job_id": "job-1",
-                "reasons": ["low_confidence:0.720"],
-                "fields": {"invoice_number": "INV-001"},
-                "confidence": 0.72,
-            },
-        )
+        with patch.object(settings, "label_studio_token", ""), patch.object(settings, "review_provider", "auto"):
+            client = TestClient(app)
+            response = client.post(
+                "/review/tasks",
+                json={
+                    "job_id": "job-1",
+                    "reasons": ["low_confidence:0.720"],
+                    "fields": {"invoice_number": "INV-001"},
+                    "confidence": 0.72,
+                },
+            )
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
@@ -120,6 +122,27 @@ class HumanReviewConsoleTests(unittest.TestCase):
             import asyncio
 
             asyncio.run(provider.create_task(task, review_task_id="review-1", payload={"route": "unknown", "verdict": "needs_review", "priority": "normal", "source": {}}))
+
+    def test_label_studio_auth_mode_supports_legacy_and_pat_tokens(self) -> None:
+        with patch.object(settings, "label_studio_auth_scheme", "token"):
+            self.assertEqual(label_studio_auth_mode("legacy-token"), "token")
+        with patch.object(settings, "label_studio_auth_scheme", "auto"):
+            self.assertEqual(label_studio_auth_mode("header.payload.signature"), "pat")
+
+    @patch("human_review_console.app.main.LabelStudioProvider.check_connection", new_callable=AsyncMock)
+    def test_provider_health_verifies_label_studio_project(self, mocked_check: AsyncMock) -> None:
+        mocked_check.return_value = {
+            "status": "ok",
+            "provider": "label_studio",
+            "project_id": 1,
+            "project_title": "IntelligentDP #1",
+            "auth_mode": "token",
+        }
+        with patch.object(settings, "label_studio_token", "configured-token"):
+            response = TestClient(app).get("/health/provider")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["project_title"], "IntelligentDP #1")
 
 
 if __name__ == "__main__":

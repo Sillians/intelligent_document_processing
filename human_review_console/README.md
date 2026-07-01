@@ -113,6 +113,7 @@ Example response with Label Studio:
 
 ## Interfaces
 - `GET /health`
+- `GET /health/provider` (verifies Label Studio authentication and project access)
 - `POST /review/tasks`
 - `GET /review/tasks/{job_id}/{review_task_id}`
 
@@ -128,6 +129,8 @@ Example response with Label Studio:
 - `LABEL_STUDIO_URL`
 - `LABEL_STUDIO_TOKEN`
 - `LABEL_STUDIO_PROJECT_ID`
+- `LABEL_STUDIO_AUTH_SCHEME`: `token`, `pat`, `bearer`, or `auto`
+- `LABEL_STUDIO_ENABLE_LEGACY_API_TOKEN`
 - `LABEL_STUDIO_USERNAME`
 - `LABEL_STUDIO_PASSWORD`
 - `LABEL_STUDIO_DISABLE_SIGNUP_WITHOUT_LINK`
@@ -153,9 +156,16 @@ LABEL_STUDIO_PROJECT_ID=1
 LABEL_STUDIO_USERNAME=<your-email-address>
 LABEL_STUDIO_PASSWORD=<strong-password-between-8-and-128-characters>
 LABEL_STUDIO_DISABLE_SIGNUP_WITHOUT_LINK=true
+LABEL_STUDIO_ENABLE_LEGACY_API_TOKEN=true
+LABEL_STUDIO_AUTH_SCHEME=token
 ```
 
 Compose passes `LABEL_STUDIO_TOKEN` into Label Studio as `LABEL_STUDIO_USER_TOKEN`, keeping the bootstrapped user's API token aligned with `human-review-console`.
+Because `LABEL_STUDIO_USER_TOKEN` is a legacy token, the Label Studio container
+also enables `LABEL_STUDIO_ENABLE_LEGACY_API_TOKEN=true`. For a personal access
+token, set `LABEL_STUDIO_AUTH_SCHEME=pat`; the integration exchanges it for a
+short-lived bearer access token. Use `bearer` only when supplying an access
+token directly.
 
 Recreate Label Studio after setting the account details:
 
@@ -241,6 +251,30 @@ Expected response when the token is loaded:
   "provider": "label_studio"
 }
 ```
+
+Verify actual authentication and access to the configured project:
+
+```bash
+curl -fsS http://localhost:8016/health/provider
+```
+
+Expected response includes:
+
+```json
+{
+  "status": "ok",
+  "provider": "label_studio",
+  "project_id": 1,
+  "project_title": "IntelligentDP #1",
+  "auth_mode": "token"
+}
+```
+
+Provider health returns HTTP `503` for an invalid token, unavailable Label
+Studio instance, or inaccessible project. Staging deployment retries this
+check and fails rather than silently accepting local-queue fallback.
+The staging overlay defaults `STAGING_REVIEW_PROVIDER=label_studio`, making
+Label Studio configuration mandatory for deployment verification.
 
 Create a test review task:
 
@@ -342,5 +376,8 @@ Run the focused workflow contract tests:
 ## Change Log
 - 2026-05-21: Documentation sync update to reflect current service naming and cross-service ingestion contract expectations.
 - 2026-06-03: Implemented modular provider-based review task creation, local queue fallback, Label Studio integration, deterministic task IDs, artifact persistence, status lookup, tests, and run instructions.
+- 2026-07-01: Added Label Studio provider readiness checks, legacy/PAT/bearer
+  authentication modes, deployment-time project verification, and explicit
+  legacy-token enablement for the bootstrapped `LABEL_STUDIO_USER_TOKEN`.
 - 2026-06-04: Added first-user Label Studio bootstrap configuration using username, password, and the existing integration access token.
 - 2026-06-04: Documented project-name versus numeric project-ID behavior, project-ID lookup, service access points, and end-to-end Label Studio integration verification.

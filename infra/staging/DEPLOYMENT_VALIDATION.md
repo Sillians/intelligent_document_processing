@@ -48,6 +48,19 @@ STAGING_TENANT_ID=default
 `STAGING_ENV_FILE` must contain the complete staging environment file. Updating
 a checkout's local `.env.staging` does not update the GitHub secret.
 
+For the CPU functional-accuracy profile, verify it contains:
+
+```text
+PREPROCESS_DESKEW_MAX_ANGLE=15.0
+OCR_BACKEND=tesseract
+OCR_FORCE_FALLBACK=false
+OCR_TESSERACT_OEM=1
+OCR_TESSERACT_PSM=3
+LABEL_STUDIO_ENABLE_LEGACY_API_TOKEN=true
+LABEL_STUDIO_AUTH_SCHEME=token
+STAGING_REVIEW_PROVIDER=label_studio
+```
+
 The post-deploy workflow deliberately skips smoke validation when
 `STAGING_PUBLIC_BASE_URL` or `STAGING_SMOKE_API_KEY` is missing. Therefore,
 inspect the `Run post-deploy staging smoke` step and confirm that it ran; a
@@ -133,6 +146,8 @@ Pass when:
 - required containers are running,
 - health-checked IDP application containers report `healthy`,
 - no container is repeatedly restarting.
+- `human-review-console /health/provider` resolves the configured Label Studio
+  project rather than reporting local-queue fallback.
 
 If a service is unhealthy, inspect it before continuing:
 
@@ -252,9 +267,10 @@ runtime error and `pipeline_contract_pass_rate` is `1.0`. Record route accuracy,
 field F1, OCR confidence, and human-review rate as the baseline; Gate 8 applies
 the approved quality thresholds.
 
-The staging overlay currently sets `OCR_FORCE_FALLBACK=true`. CORD-v2 may
-therefore complete through HITL with low extraction scores. This proves control
-flow and fallback behavior, not production OCR quality.
+The staging overlay uses native CPU Tesseract OCR with
+`OCR_BACKEND=tesseract` and `OCR_FORCE_FALLBACK=false`. CORD-v2 therefore
+measures actual OCR and extraction behavior on the staging host. PaddleOCR
+remains a separate production profile and must have its own benchmark evidence.
 
 ## Gate 5: Validate API and Resilience Behavior
 

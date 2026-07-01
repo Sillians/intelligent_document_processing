@@ -131,13 +131,53 @@ class LocalQueueProvider:
 class LabelStudioProvider:
     name = "label_studio"
 
+    def _base_url(self) -> str:
+        return settings.label_studio_url.rstrip("/")
+
     def _import_url(self) -> str:
-        base_url = settings.label_studio_url.rstrip("/")
-        return f"{base_url}/api/projects/{settings.label_studio_project_id}/import"
+        return f"{self._base_url()}/api/projects/{settings.label_studio_project_id}/import"
 
     def _project_url(self) -> str:
-        base_url = settings.label_studio_url.rstrip("/")
-        return f"{base_url}/projects/{settings.label_studio_project_id}"
+        return f"{self._base_url()}/projects/{settings.label_studio_project_id}"
+
+    def _project_api_url(self) -> str:
+        return f"{self._base_url()}/api/projects/{settings.label_studio_project_id}/"
+
+    async def _authorization_headers(self, client: httpx.AsyncClient) -> dict[str, str]:
+        token = settings.label_studio_token.strip()
+        if not token:
+            raise RuntimeError("LABEL_STUDIO_TOKEN is not configured")
+
+        auth_mode = label_studio_auth_mode(token)
+        if auth_mode == "token":
+            return {"Authorization": f"Token {token}"}
+        if auth_mode == "bearer":
+            return {"Authorization": f"Bearer {token}"}
+
+        response = await client.post(
+            f"{self._base_url()}/api/token/refresh",
+            json={"refresh": token},
+        )
+        response.raise_for_status()
+        access_token = str(response.json().get("access") or "").strip()
+        if not access_token:
+            raise RuntimeError("Label Studio token refresh did not return an access token")
+        return {"Authorization": f"Bearer {access_token}"}
+
+    async def check_connection(self) -> dict[str, Any]:
+        timeout = max(1, int(getattr(settings, "review_label_studio_timeout_seconds", 30)))
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            headers = await self._authorization_headers(client)
+            response = await client.get(self._project_api_url(), headers=headers)
+            response.raise_for_status()
+            project = response.json()
+        return {
+            "status": "ok",
+            "provider": self.name,
+            "project_id": settings.label_studio_project_id,
+            "project_title": str(project.get("title") or ""),
+            "auth_mode": label_studio_auth_mode(settings.label_studio_token),
+        }
 
     async def create_task(self, task: ReviewTaskRequest, *, review_task_id: str, payload: dict[str, Any]) -> ProviderResult:
         if not settings.label_studio_token:
@@ -159,9 +199,9 @@ class LabelStudioProvider:
                 }
             }
         ]
-        headers = {"Authorization": f"Token {settings.label_studio_token}"}
         timeout = max(1, int(getattr(settings, "review_label_studio_timeout_seconds", 30)))
         async with httpx.AsyncClient(timeout=timeout) as client:
+            headers = await self._authorization_headers(client)
             response = await client.post(self._import_url(), headers=headers, json=task_payload)
             response.raise_for_status()
             data = response.json()
@@ -174,6 +214,15 @@ class LabelStudioProvider:
             external_url=self._project_url(),
             raw_response=data,
         )
+
+
+def label_studio_auth_mode(token: str) -> str:
+    configured = str(getattr(settings, "label_studio_auth_scheme", "token") or "token").strip().lower()
+    if configured == "auto":
+        return "pat" if token.count(".") == 2 else "token"
+    if configured not in {"token", "pat", "bearer"}:
+        raise RuntimeError(f"Unsupported LABEL_STUDIO_AUTH_SCHEME: {configured}")
+    return configured
 
 
 def extract_label_studio_task_ref(data: Any, *, default: str) -> str:
@@ -259,9 +308,29 @@ async def _release_request_slot() -> None:
 
 
 @app.get("/health")
-async def health() -> dict[str, str]:
+async def health() -> dict[str, Any]:
     provider = select_provider().name
-    return {"status": "ok", "provider": provider}
+    return {
+        "status": "ok",
+        "provider": provider,
+        "label_studio_configured": bool(settings.label_studio_token),
+    }
+
+
+@app.get("/health/provider")
+async def provider_health() -> dict[str, Any]:
+    provider = select_provider()
+    if not isinstance(provider, LabelStudioProvider):
+        return {
+            "status": "disabled",
+            "provider": provider.name,
+            "label_studio_configured": False,
+        }
+    try:
+        return await provider.check_connection()
+    except (httpx.HTTPError, RuntimeError) as exc:
+        logger.warning("Label Studio provider health check failed: %s", exc)
+        raise HTTPException(status_code=503, detail=f"Label Studio provider unavailable: {exc}") from exc
 
 
 @app.post("/review/tasks")

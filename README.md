@@ -2,7 +2,7 @@
 
 This repository now contains a production-minded, on-premise **Intelligent Document Processing (IDP)** stack built with **Docker Compose** and a hybrid OCR pipeline:
 
-- Baseline OCR: **PaddleOCR 3.x**
+- Baseline OCR: **PaddleOCR 3.x**, with compact **Tesseract CPU OCR** for staging
 - Hard-page fallback: optional **OpenAI-compatible LLM/VLM inference** via local Ollama/LM Studio or GPU-backed vLLM
 - Confidence gating + HITL: automatic routing to **Label Studio**
 - Workflow orchestration: **Temporal**
@@ -51,7 +51,7 @@ For a single-host on-prem deployment with strong scale-up options and low operat
 - `gateway` (`Traefik`): public API edge for `/`, `/documents*`, and `/health`.
 - `workflow-orchestrator` (`Temporal Worker`): executes pipeline stages and branching.
 - `preprocess-worker` (`OpenCV`): deskew/denoise/threshold.
-- `ocr-service` (`PaddleOCR`): text + confidence extraction.
+- `ocr-service` (`PaddleOCR` or `Tesseract`): text + confidence extraction.
 - `layout-service` (`LayoutParser` + Detectron2 when available): block segmentation.
   - OCR Integration: Seamlessly pairs with Optical Character Recognition (OCR) engines like Tesseract, Google Cloud Vision, or open-source local models to extract clean text from specific layout zones.
 - `classifier-router-service`: document type routing profile.

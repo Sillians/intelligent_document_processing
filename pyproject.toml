@@ -42,6 +42,10 @@ ocr = [
     "paddlepaddle>=3.0.0",
     "paddleocr>=3.0.0",
 ]
+ocr-cpu = [
+    { include-group = "preprocess" },
+    "pytesseract==0.3.13",
+]
 layout = [
     { include-group = "preprocess" },
     "layoutparser[layoutmodels]==0.3.4",

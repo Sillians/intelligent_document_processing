@@ -12,7 +12,7 @@ from typing import Any
 
 import cv2
 import numpy as np
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from shared.idp_common.config import get_settings
@@ -32,9 +32,18 @@ _OCR_INFLIGHT = 0
 _OCR_INFLIGHT_LOCK = Lock()
 
 
+def _configured_backend() -> str:
+    if bool(getattr(settings, "ocr_force_fallback", False)):
+        return "fallback"
+    backend = str(getattr(settings, "ocr_backend", "paddle") or "paddle").strip().lower()
+    if backend not in {"paddle", "tesseract", "fallback"}:
+        raise RuntimeError(f"Unsupported OCR_BACKEND: {backend}")
+    return backend
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    if not bool(getattr(settings, "ocr_force_fallback", False)):
+    if _configured_backend() != "fallback":
         try:
             await asyncio.to_thread(get_ocr_engine)
         except Exception as exc:  # noqa: BLE001
@@ -200,7 +209,68 @@ def _build_engine_candidates() -> list[dict[str, Any]]:
     return candidates
 
 
-def _init_ocr_engine() -> tuple[Any, dict[str, Any]]:
+class TesseractEngine:
+    def __init__(self, pytesseract_module: Any, *, language: str, oem: int, psm: int):
+        self._pytesseract = pytesseract_module
+        self._language = language
+        self._config = f"--oem {oem} --psm {psm}"
+
+    def predict(self, image: Any) -> list[dict[str, Any]]:
+        data = self._pytesseract.image_to_data(
+            image,
+            lang=self._language,
+            config=self._config,
+            output_type=self._pytesseract.Output.DICT,
+        )
+        texts: list[str] = []
+        scores: list[float] = []
+        boxes: list[list[list[int]]] = []
+        item_count = len(data.get("text", []))
+        for index in range(item_count):
+            text = _normalize_text(data["text"][index])
+            score = _as_float(data.get("conf", [])[index] if index < len(data.get("conf", [])) else -1.0, -1.0)
+            if not text or score < 0.0:
+                continue
+            left = int(_as_float(data.get("left", [])[index], 0.0))
+            top = int(_as_float(data.get("top", [])[index], 0.0))
+            width = int(_as_float(data.get("width", [])[index], 0.0))
+            height = int(_as_float(data.get("height", [])[index], 0.0))
+            texts.append(text)
+            scores.append(max(0.0, min(1.0, score / 100.0)))
+            boxes.append(
+                [
+                    [left, top],
+                    [left + width, top],
+                    [left + width, top + height],
+                    [left, top + height],
+                ]
+            )
+        return [{"rec_texts": texts, "rec_scores": scores, "rec_polys": boxes}]
+
+
+def _init_tesseract_engine() -> tuple[Any, dict[str, Any]]:
+    import pytesseract
+
+    language = str(getattr(settings, "ocr_language", "eng") or "eng")
+    # Paddle uses "en"; Tesseract's equivalent trained-data identifier is "eng".
+    if language == "en":
+        language = "eng"
+    oem = int(getattr(settings, "ocr_tesseract_oem", 1))
+    psm = int(getattr(settings, "ocr_tesseract_psm", 3))
+    version = str(pytesseract.get_tesseract_version())
+    return (
+        TesseractEngine(pytesseract, language=language, oem=oem, psm=psm),
+        {
+            "backend": "tesseract",
+            "language": language,
+            "oem": oem,
+            "psm": psm,
+            "version": version,
+        },
+    )
+
+
+def _init_paddle_engine() -> tuple[Any, dict[str, Any]]:
     from paddleocr import PaddleOCR
 
     os.environ.setdefault("FLAGS_use_mkldnn", "0")
@@ -210,7 +280,7 @@ def _init_ocr_engine() -> tuple[Any, dict[str, Any]]:
     for kwargs in _build_engine_candidates():
         try:
             engine = PaddleOCR(**kwargs)
-            return engine, kwargs
+            return engine, {"backend": "paddle", **kwargs}
         except TypeError:
             # Ignore unsupported init args for cross-version compatibility.
             continue
@@ -221,6 +291,15 @@ def _init_ocr_engine() -> tuple[Any, dict[str, Any]]:
     if last_error is not None:
         raise last_error
     raise RuntimeError("Unable to initialize PaddleOCR with any supported configuration")
+
+
+def _init_ocr_engine() -> tuple[Any, dict[str, Any]]:
+    backend = _configured_backend()
+    if backend == "tesseract":
+        return _init_tesseract_engine()
+    if backend == "paddle":
+        return _init_paddle_engine()
+    raise RuntimeError("OCR fallback mode does not initialize an engine")
 
 
 def get_ocr_engine():
@@ -271,7 +350,7 @@ def _execute_ocr_sync(job_id: str, preprocessed_key: str) -> tuple[list[dict[str
     if image is None:
         return [], [], "invalid_image", False
 
-    if bool(getattr(settings, "ocr_force_fallback", False)):
+    if _configured_backend() == "fallback":
         return [], [], "forced_fallback", True
 
     engine = None
@@ -323,6 +402,7 @@ def _build_response(
         "mean_confidence": mean_conf,
         "full_text": full_text,
         "engine_config": _OCR_ENGINE_CONFIG or {},
+        "engine_backend": (_OCR_ENGINE_CONFIG or {}).get("backend", _configured_backend()),
         "fallback_used": fallback_used,
     }
     key = f"jobs/{job_id}/ocr/ocr.json"
@@ -334,14 +414,35 @@ def _build_response(
         "token_count": len(tokens),
         "mean_confidence": mean_conf,
         "full_text": full_text,
+        "engine_backend": (_OCR_ENGINE_CONFIG or {}).get("backend", _configured_backend()),
         "fallback_used": fallback_used,
     }
     return artifact, response, key
 
 
 @app.get("/health")
-async def health() -> dict[str, str]:
-    return {"status": "ok"}
+async def health() -> dict[str, Any]:
+    configured_backend = _configured_backend()
+    return {
+        "status": "ok",
+        "configured_backend": configured_backend,
+        "active_backend": (_OCR_ENGINE_CONFIG or {}).get("backend", ""),
+        "engine_ready": _OCR_ENGINE is not None,
+        "fallback_forced": configured_backend == "fallback",
+        "initialization_error": bool(_OCR_INIT_ERROR),
+    }
+
+
+@app.get("/ready")
+async def ready() -> dict[str, Any]:
+    backend = _configured_backend()
+    if backend == "fallback":
+        return {"status": "ready", "backend": backend}
+    if _OCR_ENGINE is None:
+        reason = _OCR_INIT_ERROR or "OCR engine is not initialized"
+        raise HTTPException(status_code=503, detail=f"{backend} backend unavailable: {reason}")
+    return {"status": "ready", "backend": (_OCR_ENGINE_CONFIG or {}).get("backend", backend)}
+
 
 @app.post("/ocr")
 async def run_ocr(request: OCRRequest) -> dict:
