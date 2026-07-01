@@ -3,6 +3,10 @@
 This milestone proves staging reliability with repeatable drills and saved
 artifacts. Production deployment remains manual until these drills are boring.
 
+For the complete ordered deployment, functional, resilience, observability,
+quality, hardening, and promotion procedure, use
+[`DEPLOYMENT_VALIDATION.md`](DEPLOYMENT_VALIDATION.md).
+
 Artifacts are written under:
 
 ```text
@@ -168,5 +172,4 @@ Recommended evidence window: the last 7 days, or every release candidate if rele
 
 
 ---
-
 

@@ -417,6 +417,12 @@ Operational readiness drills are documented in:
 infra/staging/OPERATIONAL_READINESS.md
 ```
 
+The ordered staging validation and production-promotion gates are documented in:
+
+```text
+infra/staging/DEPLOYMENT_VALIDATION.md
+```
+
 ## Production CD
 
 Production CD is manual-approval CD. It is never triggered automatically by a
