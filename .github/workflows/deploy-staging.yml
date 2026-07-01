@@ -327,7 +327,7 @@ jobs:
 
       - name: Upload staging smoke artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: staging-smoke-${{ env.SOURCE_SHA }}
           path: artifacts/staging/smoke/${{ env.SOURCE_SHA }}
