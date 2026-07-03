@@ -110,6 +110,16 @@ File: `.github/workflows/rollback-production.yml`
 This workflow rolls production back to a previously known-good image tag through
 the same GitHub `production` environment approval gate.
 
+## Dependabot
+
+File: `.github/dependabot.yml`
+
+Dependabot checks GitHub Actions in the repository root and Docker base images
+in `/docker`. Both managed Dockerfiles live in `/docker`; do not add a separate
+root Docker updater unless a root-level Dockerfile or Kubernetes manifest is
+introduced. Docker Compose files alone are not discovered by this updater and
+an empty root target fails with `dependency_file_not_found`.
+
 ## CI Jobs
 
 ### `python-contracts`
