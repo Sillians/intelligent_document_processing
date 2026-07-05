@@ -52,7 +52,9 @@ This workflow publishes immutable, SHA-tagged staging release images to GHCR:
 - `ghcr.io/<owner>/<repo>/mlflow:<sha>`
 
 It also updates the moving `staging-candidate` tag for each image and uploads a
-small release-candidate manifest artifact.
+small release-candidate manifest artifact. SHA tags are write-once: publication
+fails if any `<service>:<sha>` already exists, while only
+`staging-candidate` is intentionally mutable.
 
 Release-candidate images are published as `linux/amd64`, except
 `ocr-service`, which is published for `linux/amd64` and `linux/arm64` so the
@@ -86,6 +88,30 @@ File: `.github/workflows/deploy-staging.yml`
 This workflow deploys the release candidate to the GitHub `staging` environment.
 Use environment protection rules if staging deploys should require approval.
 
+### Benchmark Staging
+
+File: `.github/workflows/benchmark-staging.yml`
+
+**Trigger:**
+
+- Manual `workflow_dispatch` with sample count and concurrency.
+
+This workflow runs CORD-v2 against the live staging gateway using
+`infra/staging/release_acceptance.json`. It records CER/WER, extraction F1,
+validation accuracy, throughput, and p50/p95 latency, fails when an acceptance
+threshold is missed, and uploads the complete benchmark evidence directory. It
+shares the staging deployment concurrency group so a benchmark cannot overlap a
+redeployment. It reads `.idp-release-sha` from the deployed stack and checks out
+that exact source revision.
+
+### Harden Staging
+
+File: `.github/workflows/harden-staging.yml`
+
+This manual workflow validates credential age, tenant isolation, transport,
+audit persistence, encrypted backup integrity, and retention enforcement. It
+requires a second staging tenant/key and shares the staging concurrency group.
+
 ### Deploy Production
 
 File: `.github/workflows/deploy-production.yml`
@@ -94,10 +120,11 @@ File: `.github/workflows/deploy-production.yml`
 
 - Manual `workflow_dispatch` only.
 
-This workflow promotes an immutable release-candidate image tag to the GitHub
-`production` environment. Configure required reviewers on the `production`
-environment in GitHub so the workflow pauses for human approval before touching
-the server.
+The verification job first downloads the selected `Benchmark Staging` artifact
+and proves it passed the approved policy for the requested 40-character release
+SHA. Only then does the protected `production` environment request approval.
+The deployment installs TLS material, deploys every release service, and checks
+each image's OCI revision label before startup.
 
 ### Rollback Production
 
@@ -107,7 +134,7 @@ File: `.github/workflows/rollback-production.yml`
 
 - Manual `workflow_dispatch` only.
 
-This workflow rolls production back to a previously known-good image tag through
+This workflow rolls production back to a previously known-good release SHA through
 the same GitHub `production` environment approval gate.
 
 ## Dependabot
@@ -467,12 +494,27 @@ infra/staging/DEPLOYMENT_VALIDATION.md
 Production CD is manual-approval CD. It is never triggered automatically by a
 push, CI run, or staging deploy.
 
+Configure `Settings > Environments > production` before the first promotion:
+
+- add at least one required reviewer,
+- enable `Prevent self-review`,
+- restrict deployment branches to `main`,
+- disable environment-rule bypass,
+- store production secrets only on this environment, not as staging secrets.
+
+The workflow references `environment: production`, but required reviewers are a
+repository setting and cannot be safely self-configured by the deployment job.
+See [GitHub deployment environments](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments).
+
 Required GitHub environment/secrets for `production`:
 
 - `PRODUCTION_HOST`: SSH host or IP.
 - `PRODUCTION_USER`: SSH user.
 - `PRODUCTION_SSH_KEY`: private SSH key for that user.
+- `PRODUCTION_KNOWN_HOSTS`: pinned SSH host identity; fallback key scanning is not allowed.
 - `PRODUCTION_ENV_FILE`: complete `.env.production` contents.
+- `PRODUCTION_TLS_CERT`: production certificate chain.
+- `PRODUCTION_TLS_KEY`: production certificate private key.
 - `PRODUCTION_PUBLIC_BASE_URL`: public production gateway URL for smoke tests.
 - `PRODUCTION_SMOKE_API_KEY`: API key used by production smoke tests.
 - `PRODUCTION_PROMETHEUS_URL`: Prometheus URL used to prove observability.
@@ -480,24 +522,21 @@ Required GitHub environment/secrets for `production`:
 **Optional production configuration:**
 
 - `PRODUCTION_PORT`: SSH port, defaults to `22`.
-- `PRODUCTION_KNOWN_HOSTS`: pinned SSH known_hosts entry. If omitted, the workflow uses `ssh-keyscan`.
 - environment variable `PRODUCTION_APP_DIR`: remote deploy path, defaults to `/opt/idp`.
 - environment variable `PRODUCTION_TENANT_ID`: tenant for smoke tests, defaults to `default`.
 
 **Production promotion behavior:**
 
-- requires manual dispatch with an immutable `image_tag`,
-- requires a `staging_evidence_url` pointing to approved staging smoke/readiness
-  evidence,
-- waits for the GitHub `production` environment approval gate,
-- uploads a source bundle to `${PRODUCTION_APP_DIR}/releases/<image_tag>`,
+- requires a 40-character `release_sha` and passing `staging_benchmark_run_id`,
+- verifies the benchmark SHA, approved policy, sample count, and every quality gate before requesting approval,
+- waits for required reviewers on the GitHub `production` environment,
+- uploads a source bundle to `${PRODUCTION_APP_DIR}/releases/<release_sha>`,
 - atomically updates `${PRODUCTION_APP_DIR}/current`,
-- writes `.env.production` from the encrypted GitHub secret,
+- writes `.env.production` and TLS files from protected environment secrets,
 - runs production preflight and Compose config validation,
-- optionally runs a predeploy backup drill and downloads its manifest,
-- pulls the three release-candidate images,
-- restarts only `gateway`, `ingestion-service`, `workflow-orchestrator`, and
-  `delivery-service` with `--no-build --no-deps`,
+- optionally runs an encrypted predeploy backup and downloads its manifest,
+- pulls and starts the complete pipeline release,
+- verifies every release image's OCI revision equals `release_sha`,
 - runs production smoke with required observability checks,
 - uploads promotion, backup-manifest, and smoke artifacts.
 
@@ -507,8 +546,7 @@ Required GitHub environment/secrets for `production`:
 - waits for the same GitHub `production` environment approval gate,
 - installs the production env file,
 - validates production preflight and Compose config,
-- pulls the known-good images,
-- restarts the gateway-facing services,
+- deploys the complete known-good release and verifies image revisions,
 - runs production smoke with required observability checks,
 - uploads rollback and smoke artifacts.
 

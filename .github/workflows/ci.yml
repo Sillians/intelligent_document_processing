@@ -60,11 +60,15 @@ jobs:
         run: >
           uv run --no-sync python -m unittest
           tests.test_production_preflight
+          tests.test_promotion_evidence
+          tests.test_retention
+          tests.test_staging_operational_drill
           tests.client_api.test_public_contract
           tests.e2e.test_full_pipeline_e2e
           tests.benchmarks.test_dataset_benchmark
           workflow_orchestrator.tests.test_pipeline
           workflow_orchestrator.tests.test_activities
+          workflow_orchestrator.tests.test_metrics
           classifier_router_service.tests.test_main
           extraction_service.tests.test_main
           validation_service.tests.test_main
@@ -100,6 +104,14 @@ jobs:
 
       - name: Render production Compose overlay
         run: docker compose --env-file "${CI_ENV_FILE}" -f docker-compose.yml -f docker-compose.prod.yml config --quiet
+
+      - name: Validate Prometheus rules
+        run: >
+          docker run --rm
+          -v "$PWD/infra/prometheus:/etc/prometheus:ro"
+          --entrypoint promtool
+          prom/prometheus:v2.55.1
+          test rules /etc/prometheus/alerts.test.yml
 
       - name: Check critical Docker build definitions
         run: |

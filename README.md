@@ -23,6 +23,12 @@ The current production baseline is still Docker Compose, hardened before any Min
 - `docker-compose.release.yml` as the production image override for approved
   SHA-tagged release-candidate deploys.
 - `scripts/production_preflight.py` to reject unsafe secrets and exposure settings.
+- `scripts/verify_promotion_evidence.py` to bind production promotion to the
+  exact passing staging benchmark SHA.
+- `scripts/enforce_retention.py` for backup-first artifact, metadata, and audit
+  retention.
+- `.github/workflows/harden-staging.yml` for tenant isolation, encrypted backup,
+  transport, audit, and retention evidence.
 - `infra/production/README.md` for the security, deployment, scaling, backup, restore, and rollback runbook.
 - `infra/staging/OPERATIONAL_READINESS.md` for staging smoke, backup/restore, rollback, and alert drills.
 - `infra/api/PUBLIC_API.md` for the public client/API consumer contract.
@@ -263,6 +269,24 @@ python3 scripts/run_dataset_benchmark.py \
 ```
 
 Benchmark artifacts are written to `artifacts/benchmarks/<dataset>-<split>-<run-id>/` and are git-ignored by default.
+
+Run the complete staging acceptance policy:
+
+```bash
+INGESTION_API_KEY="$STAGING_SMOKE_API_KEY" TENANT_ID=default \
+  .venv/bin/python scripts/run_dataset_benchmark.py \
+  --dataset cord-v2 \
+  --split validation \
+  --limit 20 \
+  --concurrency 1 \
+  --api-url http://127.0.0.1:8081 \
+  --thresholds-file infra/staging/release_acceptance.json \
+  --no-track-evaluation
+```
+
+This records OCR CER/WER, extraction F1, validation accuracy, throughput, and
+end-to-end p50/p95 latency. The GitHub `Benchmark Staging` workflow runs the
+same gate and uploads immutable evidence for the deployed pipeline version.
 
 ## Live Stack E2E Procedure
 

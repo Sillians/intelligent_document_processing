@@ -72,7 +72,7 @@ Dry-run CORD-v2 loading without submitting to the IDP stack:
 Use JSONL for private gold datasets. Each line is one sample.
 
 ```json
-{"sample_id":"invoice-001","image_path":"/absolute/path/to/invoice-001.png","ground_truth":{"expected_route":"invoice","expected_fields":{"invoice_number":"INV-001","invoice_date":"2026/06/08","total_amount":"3186.00"}}}
+{"sample_id":"invoice-001","image_path":"/absolute/path/to/invoice-001.png","ground_truth":{"expected_route":"invoice","expected_ocr_text":"Invoice INV-001 ...","expected_validation_verdict":"auto_approved","expected_fields":{"invoice_number":"INV-001","invoice_date":"2026/06/08","total_amount":"3186.00"}}}
 ```
 
 An example manifest is included at:
@@ -109,9 +109,23 @@ INGESTION_API_KEY=dev-ingestion-key TENANT_ID=default \
   --max-human-review-rate 1
 ```
 
-For a real representative gold set, raise the quality thresholds over time. Start with
-completion and contract pass rates at `1`, then ratchet field F1, route accuracy, and
-human-review rate as extraction quality improves.
+Use the versioned staging acceptance profile:
+
+```bash
+INGESTION_API_KEY="$STAGING_SMOKE_API_KEY" TENANT_ID=default \
+  python3 scripts/run_dataset_benchmark.py \
+  --dataset cord-v2 \
+  --split validation \
+  --limit 20 \
+  --concurrency 1 \
+  --api-url http://127.0.0.1:8081 \
+  --thresholds-file infra/staging/release_acceptance.json \
+  --no-track-evaluation
+```
+
+The committed profile is marked `bootstrap`. Run a representative baseline,
+review the evidence, then change it to an approved policy rather than weakening
+individual checks after a failed release.
 
 ## Output Artifacts
 
@@ -146,17 +160,39 @@ The benchmark runner currently computes:
 - `field_f1_mean`
 - `field_exact_match_mean`
 - `ocr_confidence_mean`
+- `ocr_cer_mean`
+- `ocr_wer_mean`
 - `extraction_confidence_mean`
+- `validation_accuracy`
+- `throughput_documents_per_minute`
+- `latency_p50_seconds`
+- `latency_p95_seconds`
 - `human_review_rate`
 
 These aggregate metrics are sent to `evaluation-service` by default unless `--no-track-evaluation` is set.
 
+CER/WER are recorded only when `expected_ocr_text` is present. CORD-v2 uses its
+`valid_line.words` transcription. Validation accuracy compares an explicit
+`expected_validation_verdict` when supplied; otherwise it checks whether the
+validation gate sends imperfect field extraction to review and auto-approves
+exact field matches.
+
 Quality gate flags:
+- `--min-sample-count`
 - `--min-completion-rate`
 - `--min-contract-pass-rate`
 - `--min-route-accuracy`
 - `--min-field-f1`
+- `--min-validation-accuracy`
+- `--min-throughput-documents-per-minute`
 - `--max-human-review-rate`
+- `--max-ocr-cer`
+- `--max-ocr-wer`
+- `--max-p95-latency-seconds`
+- `--thresholds-file`
+
+Use `--concurrency` to record a controlled load profile. Compare runs only when
+dataset, split, sample count, concurrency, OCR backend, and host resources match.
 
 ## Best Practice
 

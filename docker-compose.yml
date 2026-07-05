@@ -425,6 +425,20 @@ services:
     restart: unless-stopped
     networks: [idp]
 
+  node-exporter:
+    image: prom/node-exporter:v1.11.1
+    command:
+      - --path.procfs=/host/proc
+      - --path.sysfs=/host/sys
+      - --path.rootfs=/host/root
+      - --collector.filesystem.mount-points-exclude=^/(dev|proc|sys|var/lib/docker/.+|var/lib/containers/storage/.+)($|/)
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/host/root:ro
+    restart: unless-stopped
+    networks: [idp]
+
   alertmanager:
     image: prom/alertmanager:v0.27.0
     entrypoint: ["/etc/alertmanager/render-and-run.sh"]

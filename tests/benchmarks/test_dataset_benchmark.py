@@ -8,11 +8,14 @@ from pathlib import Path
 from scripts.run_dataset_benchmark import (
     BenchmarkConfig,
     aggregate_metrics,
+    build_config,
     compare_expected_fields,
+    error_rate,
     evaluate_quality_gate,
     extract_cord_ground_truth,
     load_manifest_samples,
     normalize_amount,
+    parse_args,
 )
 
 
@@ -72,7 +75,11 @@ class DatasetBenchmarkTests(unittest.TestCase):
                     "field_f1": 0.666667,
                     "field_exact_match": 0.5,
                     "ocr_confidence": 0.8,
+                    "ocr_cer": 0.1,
+                    "ocr_wer": 0.2,
                     "extraction_confidence": 0.7,
+                    "validation_correct": True,
+                    "latency_seconds": 10.0,
                     "requires_human_review": False,
                 },
                 {
@@ -84,16 +91,32 @@ class DatasetBenchmarkTests(unittest.TestCase):
                     "field_f1": 0.0,
                     "field_exact_match": 0.0,
                     "ocr_confidence": 0.2,
+                    "ocr_cer": 0.3,
+                    "ocr_wer": 0.4,
                     "extraction_confidence": 0.1,
+                    "validation_correct": False,
+                    "latency_seconds": 20.0,
                     "requires_human_review": True,
                 },
-            ]
+            ],
+            elapsed_seconds=30,
         )
 
         self.assertEqual(metrics["sample_count"], 2)
         self.assertEqual(metrics["completion_rate"], 0.5)
         self.assertEqual(metrics["route_accuracy"], 0.5)
         self.assertEqual(metrics["human_review_rate"], 0.5)
+        self.assertEqual(metrics["ocr_cer_mean"], 0.2)
+        self.assertEqual(metrics["ocr_wer_mean"], 0.3)
+        self.assertEqual(metrics["validation_accuracy"], 0.5)
+        self.assertEqual(metrics["throughput_documents_per_minute"], 2.0)
+        self.assertEqual(metrics["latency_p50_seconds"], 15.0)
+        self.assertEqual(metrics["latency_p95_seconds"], 19.5)
+
+    def test_ocr_error_rates_use_character_and_word_units(self) -> None:
+        self.assertAlmostEqual(error_rate("total amount", "total amont", words=False) or 0, 1 / 12, places=6)
+        self.assertEqual(error_rate("total amount", "total amont", words=True), 0.5)
+        self.assertIsNone(error_rate("", "anything", words=False))
 
     def test_manifest_loader_supports_private_gold_format(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -109,6 +132,8 @@ class DatasetBenchmarkTests(unittest.TestCase):
                         "ground_truth": {
                             "expected_route": "invoice",
                             "expected_fields": {"invoice_number": "INV-1"},
+                            "expected_ocr_text": "Invoice INV-1",
+                            "expected_validation_verdict": "auto_approved",
                         },
                     }
                 )
@@ -134,11 +159,19 @@ class DatasetBenchmarkTests(unittest.TestCase):
                 pipeline_version="test",
                 track_evaluation=False,
                 dry_run=True,
+                concurrency=1,
+                thresholds_file=None,
+                min_sample_count=None,
                 min_completion_rate=None,
                 min_contract_pass_rate=None,
                 min_route_accuracy=None,
                 min_field_f1=None,
+                min_validation_accuracy=None,
+                min_throughput_documents_per_minute=None,
                 max_human_review_rate=None,
+                max_ocr_cer=None,
+                max_ocr_wer=None,
+                max_p95_latency_seconds=None,
             )
 
             sample = next(load_manifest_samples(config))
@@ -146,6 +179,8 @@ class DatasetBenchmarkTests(unittest.TestCase):
             self.assertEqual(sample.sample_id, "sample-1")
             self.assertEqual(sample.expected_route, "invoice")
             self.assertEqual(sample.expected_fields["invoice_number"], "INV-1")
+            self.assertEqual(sample.expected_ocr_text, "Invoice INV-1")
+            self.assertEqual(sample.expected_validation_verdict, "auto_approved")
 
     def test_quality_gate_passes_when_thresholds_are_met(self) -> None:
         config = self._benchmark_config(
@@ -154,6 +189,11 @@ class DatasetBenchmarkTests(unittest.TestCase):
             min_route_accuracy=0.8,
             min_field_f1=0.7,
             max_human_review_rate=0.5,
+            max_ocr_cer=0.3,
+            max_ocr_wer=0.4,
+            min_validation_accuracy=0.8,
+            min_throughput_documents_per_minute=1.0,
+            max_p95_latency_seconds=30.0,
         )
         aggregate = {
             "completion_rate": 1.0,
@@ -161,6 +201,11 @@ class DatasetBenchmarkTests(unittest.TestCase):
             "route_accuracy": 0.9,
             "field_f1_mean": 0.75,
             "human_review_rate": 0.4,
+            "ocr_cer_mean": 0.2,
+            "ocr_wer_mean": 0.3,
+            "validation_accuracy": 1.0,
+            "throughput_documents_per_minute": 2.0,
+            "latency_p95_seconds": 20.0,
         }
 
         gate = evaluate_quality_gate(config, aggregate, error_count=0)
@@ -187,6 +232,44 @@ class DatasetBenchmarkTests(unittest.TestCase):
             ["completion_rate", "field_f1_mean", "human_review_rate"],
         )
 
+    def test_quality_gate_fails_when_requested_metric_is_unavailable(self) -> None:
+        config = self._benchmark_config(max_ocr_cer=0.3)
+        gate = evaluate_quality_gate(config, {"ocr_cer_mean": None}, error_count=0)
+
+        self.assertFalse(gate["passed"])
+        self.assertEqual(gate["failed_checks"][0]["actual"], None)
+
+    def test_threshold_file_populates_release_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            threshold_path = Path(tmp) / "thresholds.json"
+            threshold_path.write_text(
+                json.dumps(
+                    {
+                        "thresholds": {
+                            "min_sample_count": 20,
+                            "max_ocr_cer": 0.25,
+                            "max_p95_latency_seconds": 90,
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            config = build_config(
+                parse_args(
+                    [
+                        "--manifest",
+                        "data/benchmarks/example_manifest.jsonl",
+                        "--thresholds-file",
+                        str(threshold_path),
+                    ]
+                )
+            )
+
+        self.assertEqual(config.min_sample_count, 20)
+        self.assertEqual(config.max_ocr_cer, 0.25)
+        self.assertEqual(config.max_p95_latency_seconds, 90)
+
     def _benchmark_config(self, **overrides: object) -> BenchmarkConfig:
         defaults: dict[str, object] = {
             "dataset": "manifest",
@@ -207,11 +290,19 @@ class DatasetBenchmarkTests(unittest.TestCase):
             "pipeline_version": "test",
             "track_evaluation": False,
             "dry_run": True,
+            "concurrency": 1,
+            "thresholds_file": None,
+            "min_sample_count": None,
             "min_completion_rate": None,
             "min_contract_pass_rate": None,
             "min_route_accuracy": None,
             "min_field_f1": None,
+            "min_validation_accuracy": None,
+            "min_throughput_documents_per_minute": None,
             "max_human_review_rate": None,
+            "max_ocr_cer": None,
+            "max_ocr_wer": None,
+            "max_p95_latency_seconds": None,
         }
         defaults.update(overrides)
         return BenchmarkConfig(**defaults)

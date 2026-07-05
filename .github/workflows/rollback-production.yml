@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       image_tag:
-        description: Previously known-good image tag to roll back to.
+        description: Previously known-good 40-character release SHA.
         required: true
         type: string
       reason:
@@ -45,15 +45,16 @@ jobs:
           CHANGE_TICKET: ${{ inputs.change_ticket }}
         run: |
           set -euo pipefail
-          if [ -z "$IMAGE_TAG" ]; then
-            echo "image_tag is required" >&2
+          if ! [[ "$IMAGE_TAG" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "image_tag must be an immutable 40-character commit SHA" >&2
             exit 1
           fi
-          if printf '%s' "$IMAGE_TAG" | grep -Eq '[[:space:]/]'; then
-            echo "image_tag must be a single immutable tag without spaces or slashes" >&2
+          if ! [[ "$PRODUCTION_APP_DIR" =~ ^/[A-Za-z0-9._/-]+$ ]] || [[ "$PRODUCTION_APP_DIR" == *".."* ]]; then
+            echo "PRODUCTION_APP_DIR must be a safe absolute path." >&2
             exit 1
           fi
           image_namespace="ghcr.io/${GITHUB_REPOSITORY,,}"
+          release_dir="${PRODUCTION_APP_DIR}/releases/${IMAGE_TAG}"
           evidence_dir="artifacts/production/rollback/${IMAGE_TAG}"
           mkdir -p "$evidence_dir"
           cat > "${evidence_dir}/rollback_request.json" <<JSON
@@ -71,6 +72,7 @@ jobs:
             echo "IMAGE_NAMESPACE=${image_namespace}"
             echo "IMAGE_TAG=${IMAGE_TAG}"
             echo "PRODUCTION_APP_DIR=${PRODUCTION_APP_DIR}"
+            echo "RELEASE_DIR=${release_dir}"
             echo "EVIDENCE_DIR=${evidence_dir}"
           } >> "$GITHUB_ENV"
 
@@ -83,6 +85,9 @@ jobs:
           PRODUCTION_PUBLIC_BASE_URL: ${{ secrets.PRODUCTION_PUBLIC_BASE_URL }}
           PRODUCTION_SMOKE_API_KEY: ${{ secrets.PRODUCTION_SMOKE_API_KEY }}
           PRODUCTION_PROMETHEUS_URL: ${{ secrets.PRODUCTION_PROMETHEUS_URL }}
+          PRODUCTION_KNOWN_HOSTS: ${{ secrets.PRODUCTION_KNOWN_HOSTS }}
+          PRODUCTION_TLS_CERT: ${{ secrets.PRODUCTION_TLS_CERT }}
+          PRODUCTION_TLS_KEY: ${{ secrets.PRODUCTION_TLS_KEY }}
         run: |
           set -euo pipefail
           test -n "$PRODUCTION_HOST"
@@ -92,6 +97,14 @@ jobs:
           test -n "$PRODUCTION_PUBLIC_BASE_URL"
           test -n "$PRODUCTION_SMOKE_API_KEY"
           test -n "$PRODUCTION_PROMETHEUS_URL"
+          test -n "$PRODUCTION_KNOWN_HOSTS"
+          test -n "$PRODUCTION_TLS_CERT"
+          test -n "$PRODUCTION_TLS_KEY"
+          [[ "$PRODUCTION_PUBLIC_BASE_URL" == https://* ]]
+          if [ "$PRODUCTION_HOST" = "127.0.0.1" ] || [ "$PRODUCTION_HOST" = "localhost" ]; then
+            echo "PRODUCTION_HOST must be dedicated infrastructure." >&2
+            exit 1
+          fi
 
       - name: Configure SSH
         env:
@@ -105,11 +118,8 @@ jobs:
           chmod 700 ~/.ssh
           printf '%s\n' "$PRODUCTION_SSH_KEY" > ~/.ssh/id_production
           chmod 600 ~/.ssh/id_production
-          if [ -n "$PRODUCTION_KNOWN_HOSTS" ]; then
-            printf '%s\n' "$PRODUCTION_KNOWN_HOSTS" > ~/.ssh/known_hosts
-          else
-            ssh-keyscan -p "$PRODUCTION_PORT" "$PRODUCTION_HOST" >> ~/.ssh/known_hosts
-          fi
+          test -n "$PRODUCTION_KNOWN_HOSTS"
+          printf '%s\n' "$PRODUCTION_KNOWN_HOSTS" > ~/.ssh/known_hosts
           chmod 600 ~/.ssh/known_hosts
 
       - name: Upload rollback bundle
@@ -120,15 +130,16 @@ jobs:
         run: |
           set -euo pipefail
           ssh -i ~/.ssh/id_production -p "$PRODUCTION_PORT" "${PRODUCTION_USER}@${PRODUCTION_HOST}" \
-            "mkdir -p '${PRODUCTION_APP_DIR}/releases/${IMAGE_TAG}'"
+            "mkdir -p '${RELEASE_DIR}'"
           tar \
             --exclude='.git' \
             --exclude='.venv' \
             --exclude='artifacts' \
             --exclude='data' \
+            --exclude='.env*' \
             --exclude='__pycache__' \
             -czf - . | ssh -i ~/.ssh/id_production -p "$PRODUCTION_PORT" "${PRODUCTION_USER}@${PRODUCTION_HOST}" \
-            "tar -xzf - -C '${PRODUCTION_APP_DIR}/releases/${IMAGE_TAG}' && ln -sfn '${PRODUCTION_APP_DIR}/releases/${IMAGE_TAG}' '${PRODUCTION_APP_DIR}/current'"
+            "tar -xzf - -C '${RELEASE_DIR}'"
 
       - name: Install production env file
         env:
@@ -139,7 +150,25 @@ jobs:
         run: |
           set -euo pipefail
           printf '%s\n' "$PRODUCTION_ENV_FILE" | ssh -i ~/.ssh/id_production -p "$PRODUCTION_PORT" "${PRODUCTION_USER}@${PRODUCTION_HOST}" \
-            "cat > '${PRODUCTION_APP_DIR}/current/.env.production.tmp' && chmod 600 '${PRODUCTION_APP_DIR}/current/.env.production.tmp' && mv '${PRODUCTION_APP_DIR}/current/.env.production.tmp' '${PRODUCTION_APP_DIR}/current/.env.production'"
+            "cat > '${RELEASE_DIR}/.env.production.tmp' && chmod 600 '${RELEASE_DIR}/.env.production.tmp' && mv '${RELEASE_DIR}/.env.production.tmp' '${RELEASE_DIR}/.env.production'"
+
+      - name: Install production TLS certificate
+        env:
+          PRODUCTION_HOST: ${{ secrets.PRODUCTION_HOST }}
+          PRODUCTION_USER: ${{ secrets.PRODUCTION_USER }}
+          PRODUCTION_PORT: ${{ secrets.PRODUCTION_PORT || '22' }}
+          PRODUCTION_TLS_CERT: ${{ secrets.PRODUCTION_TLS_CERT }}
+          PRODUCTION_TLS_KEY: ${{ secrets.PRODUCTION_TLS_KEY }}
+        run: |
+          set -euo pipefail
+          remote="${PRODUCTION_USER}@${PRODUCTION_HOST}"
+          tls_dir="${RELEASE_DIR}/infra/traefik/tls"
+          ssh -i ~/.ssh/id_production -p "$PRODUCTION_PORT" "${remote}" \
+            "mkdir -p '${tls_dir}' && chmod 700 '${tls_dir}'"
+          printf '%s\n' "$PRODUCTION_TLS_CERT" | ssh -i ~/.ssh/id_production -p "$PRODUCTION_PORT" "${remote}" \
+            "umask 077; cat > '${tls_dir}/production.crt'"
+          printf '%s\n' "$PRODUCTION_TLS_KEY" | ssh -i ~/.ssh/id_production -p "$PRODUCTION_PORT" "${remote}" \
+            "umask 077; cat > '${tls_dir}/production.key'"
 
       - name: Roll back production services
         env:
@@ -151,16 +180,14 @@ jobs:
         run: |
           set -euo pipefail
           ssh -i ~/.ssh/id_production -p "$PRODUCTION_PORT" "${PRODUCTION_USER}@${PRODUCTION_HOST}" \
-            "cd '${PRODUCTION_APP_DIR}/current' && \
+            "cd '${RELEASE_DIR}' && \
              echo '${GHCR_TOKEN}' | docker login ghcr.io -u '${GHCR_USERNAME}' --password-stdin && \
              export IDP_ENV_FILE=.env.production && \
              export IDP_IMAGE_REGISTRY='${IMAGE_NAMESPACE}' && \
              export IDP_IMAGE_TAG='${IMAGE_TAG}' && \
-             python3 scripts/production_preflight.py --env-file .env.production && \
-             docker compose --env-file .env.production -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.release.yml config --quiet && \
-             docker compose --env-file .env.production -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.release.yml pull ingestion-service workflow-orchestrator delivery-service && \
-             docker compose --env-file .env.production -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.release.yml up -d --no-build --no-deps gateway ingestion-service workflow-orchestrator delivery-service && \
-             docker compose --env-file .env.production -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.release.yml ps gateway ingestion-service workflow-orchestrator delivery-service"
+             python3 scripts/production_preflight.py --env-file .env.production --environment production && \
+             bash scripts/deploy_release.sh && \
+             ln -sfn '${RELEASE_DIR}' '${PRODUCTION_APP_DIR}/current'"
 
       - name: Run post-rollback production smoke
         env:

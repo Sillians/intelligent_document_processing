@@ -9,11 +9,6 @@ on:
     types:
       - completed
   workflow_dispatch:
-    inputs:
-      image_tag:
-        description: Optional image tag. Defaults to the selected commit SHA.
-        required: false
-        type: string
 
 permissions:
   contents: read
@@ -45,9 +40,10 @@ jobs:
         run: |
           set -euo pipefail
           image_namespace="ghcr.io/${GITHUB_REPOSITORY,,}"
-          image_tag="${{ inputs.image_tag }}"
-          if [ -z "$image_tag" ]; then
-            image_tag="${SOURCE_SHA}"
+          image_tag="${SOURCE_SHA}"
+          if ! [[ "${image_tag}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Release candidates must use the immutable 40-character source SHA." >&2
+            exit 1
           fi
           echo "IMAGE_NAMESPACE=${image_namespace}" >> "$GITHUB_ENV"
           echo "IMAGE_TAG=${image_tag}" >> "$GITHUB_ENV"
@@ -64,6 +60,24 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ github.token }}
+
+      - name: Reject existing immutable SHA tags
+        run: |
+          set -euo pipefail
+          services=(
+            ingestion-service workflow-orchestrator preprocess-worker ocr-service
+            layout-service classifier-router-service extraction-service
+            validation-service human-review-console delivery-service
+            evaluation-service mlflow
+          )
+          for service in "${services[@]}"; do
+            image="${IMAGE_NAMESPACE}/${service}:${IMAGE_TAG}"
+            if docker buildx imagetools inspect "${image}" >/dev/null 2>&1; then
+              echo "Refusing to overwrite immutable release image ${image}." >&2
+              echo "Create a new commit SHA for a new release candidate." >&2
+              exit 1
+            fi
+          done
 
       - name: Build and push release images
         run: |

@@ -21,6 +21,7 @@ from workflow_orchestrator.app.activities import (
     preprocess_activity,
     validate_activity,
 )
+from workflow_orchestrator.app.metrics import monitor_task_queue, start_metrics_server
 from workflow_orchestrator.app.workflows import DocumentPipelineWorkflow
 
 
@@ -42,6 +43,7 @@ async def main() -> None:
     _configure_logging()
     logger = logging.getLogger("workflow_orchestrator.worker")
     settings = get_settings()
+    start_metrics_server()
 
     logger.info(
         "Connecting worker to Temporal address=%s namespace=%s task_queue=%s",
@@ -77,7 +79,19 @@ async def main() -> None:
     )
 
     logger.info("Temporal worker started")
-    await worker.run()
+    metrics_task = asyncio.create_task(
+        monitor_task_queue(
+            client,
+            settings.temporal_namespace,
+            settings.temporal_task_queue,
+        ),
+        name="temporal-task-queue-metrics",
+    )
+    try:
+        await worker.run()
+    finally:
+        metrics_task.cancel()
+        await asyncio.gather(metrics_task, return_exceptions=True)
 
 
 if __name__ == "__main__":

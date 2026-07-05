@@ -174,6 +174,8 @@ Default HTTP metrics plus ingestion-specific metrics:
 - Security headers enabled (`X-Content-Type-Options`, `X-Frame-Options`, `Cache-Control`).
 - No raw file payloads are logged.
 - Actor attribution retained via audit entries.
+- Retention enforcement removes expired raw objects, derived job artifacts,
+  metadata, and audit events according to independent policy windows.
 
 ## Key Configuration
 - `POSTGRES_HOST`
@@ -183,6 +185,9 @@ Default HTTP metrics plus ingestion-specific metrics:
 - `POSTGRES_DB`
 - `INGESTION_DB_POOL_MIN`
 - `INGESTION_DB_POOL_MAX`
+- `RAW_ARTIFACT_RETENTION_DAYS`
+- `DERIVED_ARTIFACT_RETENTION_DAYS`
+- `AUDIT_RETENTION_DAYS`
 - `S3_ENDPOINT`
 - `S3_ACCESS_KEY`
 - `S3_SECRET_KEY`
@@ -222,3 +227,4 @@ For idempotency checks, run `Submit Document (Idempotent)` twice with the same `
 
 ## Change Log
 - 2026-05-21: Implemented full ingestion pipeline features (auth/tenant scope, validation, idempotency/dedupe, artifact persistence, metadata/audit storage, Temporal queue publish, status/audit/result APIs, security headers, and ingestion-specific observability metrics).
+- 2026-07-03: Added tenant-isolation hardening evidence and backup-first retention enforcement through `scripts/enforce_retention.py`.

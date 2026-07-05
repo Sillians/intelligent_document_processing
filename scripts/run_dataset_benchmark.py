@@ -13,6 +13,7 @@ dataset ground truth and optionally tracks aggregate metrics in evaluation-servi
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
 import math
 import os
@@ -75,11 +76,19 @@ class BenchmarkConfig:
     pipeline_version: str
     track_evaluation: bool
     dry_run: bool
+    concurrency: int
+    thresholds_file: Path | None
+    min_sample_count: int | None
     min_completion_rate: float | None
     min_contract_pass_rate: float | None
     min_route_accuracy: float | None
     min_field_f1: float | None
+    min_validation_accuracy: float | None
+    min_throughput_documents_per_minute: float | None
     max_human_review_rate: float | None
+    max_ocr_cer: float | None
+    max_ocr_wer: float | None
+    max_p95_latency_seconds: float | None
 
 
 @dataclass(frozen=True)
@@ -92,6 +101,8 @@ class BenchmarkSample:
     expected_fields: dict[str, Any]
     expected_route: str
     metadata: dict[str, Any]
+    expected_ocr_text: str = ""
+    expected_validation_verdict: str = ""
 
 
 def env_bool(name: str, default: bool = False) -> bool:
@@ -131,12 +142,48 @@ def env_optional_float(name: str) -> float | None:
         raise E2EError(f"{name} must be a number") from exc
 
 
+def env_optional_int(name: str) -> int | None:
+    value = os.environ.get(name)
+    if value is None or not value.strip():
+        return None
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise E2EError(f"{name} must be an integer") from exc
+
+
 def validate_rate(name: str, value: float | None) -> float | None:
     if value is None:
         return None
     if not 0 <= value <= 1:
         raise E2EError(f"{name} must be between 0 and 1")
     return value
+
+
+def validate_non_negative(name: str, value: float | None) -> float | None:
+    if value is not None and value < 0:
+        raise E2EError(f"{name} must be zero or greater")
+    return value
+
+
+def load_thresholds(path: Path | None) -> dict[str, float]:
+    if path is None:
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise E2EError(f"unable to load threshold file {path}: {exc}") from exc
+    thresholds = payload.get("thresholds") if isinstance(payload, dict) else None
+    if not isinstance(thresholds, dict):
+        raise E2EError(f"threshold file {path} must contain a thresholds object")
+    result: dict[str, float] = {}
+    for key, value in thresholds.items():
+        if value is not None:
+            try:
+                result[str(key)] = float(value)
+            except (TypeError, ValueError) as exc:
+                raise E2EError(f"threshold {key} in {path} must be numeric") from exc
+    return result
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -158,13 +205,29 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--tenant-id", default=os.environ.get("TENANT_ID", "default"))
     parser.add_argument("--actor-id", default=os.environ.get("ACTOR_ID", "benchmark-runner"))
     parser.add_argument("--pipeline-version", default=os.environ.get("PIPELINE_VERSION", "development"))
+    parser.add_argument("--concurrency", type=int, default=env_int("BENCHMARK_CONCURRENCY", 1))
+    parser.add_argument(
+        "--thresholds-file",
+        type=Path,
+        default=Path(os.environ["BENCHMARK_THRESHOLDS_FILE"]) if os.environ.get("BENCHMARK_THRESHOLDS_FILE") else None,
+    )
     parser.add_argument("--no-track-evaluation", action="store_true", help="Do not POST aggregate metrics to evaluation-service")
     parser.add_argument("--dry-run", action="store_true", help="Load samples and write expected manifests without submitting")
+    parser.add_argument("--min-sample-count", type=int, default=env_optional_int("MIN_SAMPLE_COUNT"))
     parser.add_argument("--min-completion-rate", type=float, default=env_optional_float("MIN_COMPLETION_RATE"))
     parser.add_argument("--min-contract-pass-rate", type=float, default=env_optional_float("MIN_CONTRACT_PASS_RATE"))
     parser.add_argument("--min-route-accuracy", type=float, default=env_optional_float("MIN_ROUTE_ACCURACY"))
     parser.add_argument("--min-field-f1", type=float, default=env_optional_float("MIN_FIELD_F1"))
+    parser.add_argument("--min-validation-accuracy", type=float, default=env_optional_float("MIN_VALIDATION_ACCURACY"))
+    parser.add_argument(
+        "--min-throughput-documents-per-minute",
+        type=float,
+        default=env_optional_float("MIN_THROUGHPUT_DOCUMENTS_PER_MINUTE"),
+    )
     parser.add_argument("--max-human-review-rate", type=float, default=env_optional_float("MAX_HUMAN_REVIEW_RATE"))
+    parser.add_argument("--max-ocr-cer", type=float, default=env_optional_float("MAX_OCR_CER"))
+    parser.add_argument("--max-ocr-wer", type=float, default=env_optional_float("MAX_OCR_WER"))
+    parser.add_argument("--max-p95-latency-seconds", type=float, default=env_optional_float("MAX_P95_LATENCY_SECONDS"))
     return parser.parse_args(argv)
 
 
@@ -172,6 +235,12 @@ def build_config(args: argparse.Namespace) -> BenchmarkConfig:
     dataset = args.dataset or "manifest"
     run_id = os.environ.get("BENCHMARK_RUN_ID") or time.strftime("%Y%m%d-%H%M%S")
     artifact_dir = args.artifact_dir or Path(f"artifacts/benchmarks/{dataset}-{args.split}-{run_id}")
+    thresholds = load_thresholds(args.thresholds_file)
+
+    def threshold(name: str) -> float | None:
+        value = getattr(args, name)
+        return value if value is not None else thresholds.get(name)
+
     return BenchmarkConfig(
         dataset=dataset,
         split=args.split,
@@ -191,11 +260,30 @@ def build_config(args: argparse.Namespace) -> BenchmarkConfig:
         pipeline_version=args.pipeline_version,
         track_evaluation=not args.no_track_evaluation,
         dry_run=bool(args.dry_run),
-        min_completion_rate=validate_rate("--min-completion-rate", args.min_completion_rate),
-        min_contract_pass_rate=validate_rate("--min-contract-pass-rate", args.min_contract_pass_rate),
-        min_route_accuracy=validate_rate("--min-route-accuracy", args.min_route_accuracy),
-        min_field_f1=validate_rate("--min-field-f1", args.min_field_f1),
-        max_human_review_rate=validate_rate("--max-human-review-rate", args.max_human_review_rate),
+        concurrency=max(1, args.concurrency),
+        thresholds_file=args.thresholds_file,
+        min_sample_count=(
+            max(1, int(threshold("min_sample_count"))) if threshold("min_sample_count") is not None else None
+        ),
+        min_completion_rate=validate_rate("--min-completion-rate", threshold("min_completion_rate")),
+        min_contract_pass_rate=validate_rate("--min-contract-pass-rate", threshold("min_contract_pass_rate")),
+        min_route_accuracy=validate_rate("--min-route-accuracy", threshold("min_route_accuracy")),
+        min_field_f1=validate_rate("--min-field-f1", threshold("min_field_f1")),
+        min_validation_accuracy=validate_rate(
+            "--min-validation-accuracy",
+            threshold("min_validation_accuracy"),
+        ),
+        min_throughput_documents_per_minute=validate_non_negative(
+            "--min-throughput-documents-per-minute",
+            threshold("min_throughput_documents_per_minute"),
+        ),
+        max_human_review_rate=validate_rate("--max-human-review-rate", threshold("max_human_review_rate")),
+        max_ocr_cer=validate_non_negative("--max-ocr-cer", threshold("max_ocr_cer")),
+        max_ocr_wer=validate_non_negative("--max-ocr-wer", threshold("max_ocr_wer")),
+        max_p95_latency_seconds=validate_non_negative(
+            "--max-p95-latency-seconds",
+            threshold("max_p95_latency_seconds"),
+        ),
     )
 
 
@@ -203,6 +291,7 @@ def redacted_config(config: BenchmarkConfig) -> dict[str, Any]:
     data = asdict(config)
     data["artifact_dir"] = str(config.artifact_dir)
     data["manifest"] = str(config.manifest) if config.manifest else None
+    data["thresholds_file"] = str(config.thresholds_file) if config.thresholds_file else None
     data["ingestion_api_key"] = "***"
     return data
 
@@ -241,6 +330,48 @@ def first_non_empty(*values: Any) -> str:
 
 def normalize_text(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "").strip()).lower()
+
+
+def edit_distance(expected: list[str], predicted: list[str]) -> int:
+    previous = list(range(len(predicted) + 1))
+    for expected_index, expected_value in enumerate(expected, start=1):
+        current = [expected_index]
+        for predicted_index, predicted_value in enumerate(predicted, start=1):
+            substitution_cost = 0 if expected_value == predicted_value else 1
+            current.append(
+                min(
+                    current[-1] + 1,
+                    previous[predicted_index] + 1,
+                    previous[predicted_index - 1] + substitution_cost,
+                )
+            )
+        previous = current
+    return previous[-1]
+
+
+def error_rate(expected_text: str, predicted_text: str, *, words: bool) -> float | None:
+    expected_normalized = normalize_text(expected_text)
+    if not expected_normalized:
+        return None
+    predicted_normalized = normalize_text(predicted_text)
+    expected_units = expected_normalized.split() if words else list(expected_normalized)
+    predicted_units = predicted_normalized.split() if words else list(predicted_normalized)
+    return round(edit_distance(expected_units, predicted_units) / len(expected_units), 6)
+
+
+def extract_cord_ocr_text(ground_truth: dict[str, Any]) -> str:
+    lines: list[str] = []
+    for line in as_list(ground_truth.get("valid_line")):
+        if not isinstance(line, dict):
+            continue
+        words = [
+            str(word.get("text") or "").strip()
+            for word in as_list(line.get("words"))
+            if isinstance(word, dict) and str(word.get("text") or "").strip()
+        ]
+        if words:
+            lines.append(" ".join(words))
+    return "\n".join(lines)
 
 
 def normalize_amount(value: Any) -> str:
@@ -304,6 +435,7 @@ def extract_cord_ground_truth(raw_ground_truth: Any) -> dict[str, Any]:
         "expected_route": "receipt",
         "expected_fields": expected_fields,
         "gt_parse": gt_parse,
+        "expected_ocr_text": extract_cord_ocr_text(ground_truth),
     }
 
 
@@ -346,6 +478,7 @@ def load_cord_samples(config: BenchmarkConfig) -> Iterator[BenchmarkSample]:
             expected_fields=normalized_truth["expected_fields"],
             expected_route=normalized_truth["expected_route"],
             metadata={"source_dataset": CORD_DATASET_ID},
+            expected_ocr_text=normalized_truth["expected_ocr_text"],
         )
         emitted += 1
         if emitted >= config.limit:
@@ -381,6 +514,18 @@ def load_manifest_samples(config: BenchmarkConfig) -> Iterator[BenchmarkSample]:
             expected_fields=expected_fields,
             expected_route=expected_route,
             metadata={key: value for key, value in row.items() if key not in {"image_path", "ground_truth"}},
+            expected_ocr_text=str(
+                ground_truth.get("expected_ocr_text")
+                or ground_truth.get("ocr_text")
+                or row.get("expected_ocr_text")
+                or ""
+            ),
+            expected_validation_verdict=str(
+                ground_truth.get("expected_validation_verdict")
+                or ground_truth.get("validation_verdict")
+                or row.get("expected_validation_verdict")
+                or ""
+            ),
         )
 
 
@@ -527,6 +672,7 @@ def build_sample_metrics(
     result_response: dict[str, Any] | None,
     validation_errors: list[str],
     runtime_status: str,
+    latency_seconds: float | None = None,
 ) -> dict[str, Any]:
     predicted_fields = extract_fields_from_result(result_response or {})
     comparison = compare_expected_fields(sample.expected_fields, predicted_fields)
@@ -539,6 +685,16 @@ def build_sample_metrics(
 
     route = str(extraction.get("route") or validation.get("route") or classification.get("route") or "unknown")
     workflow_status = str(result.get("status") or runtime_status)
+    predicted_ocr_text = str(ocr.get("full_text") or "")
+    validation_verdict = str(validation.get("verdict") or "unknown")
+    expected_validation_verdict = sample.expected_validation_verdict.strip()
+    requires_human_review = bool(validation.get("requires_human_review"))
+    expected_requires_human_review = safe_float(comparison.get("field_f1")) < 1.0
+    validation_correct = (
+        validation_verdict == expected_validation_verdict
+        if expected_validation_verdict
+        else requires_human_review == expected_requires_human_review
+    )
     return {
         "sample_id": sample.sample_id,
         "dataset": sample.dataset,
@@ -549,9 +705,17 @@ def build_sample_metrics(
         "predicted_route": route,
         "route_match": route == sample.expected_route,
         "ocr_confidence": safe_float(ocr.get("mean_confidence")),
+        "ocr_reference_available": bool(sample.expected_ocr_text.strip()),
+        "ocr_cer": error_rate(sample.expected_ocr_text, predicted_ocr_text, words=False),
+        "ocr_wer": error_rate(sample.expected_ocr_text, predicted_ocr_text, words=True),
         "extraction_confidence": safe_float(extraction.get("confidence")),
-        "requires_human_review": bool(validation.get("requires_human_review")),
-        "validation_verdict": validation.get("verdict") or "unknown",
+        "requires_human_review": requires_human_review,
+        "validation_verdict": validation_verdict,
+        "expected_validation_verdict": expected_validation_verdict or None,
+        "expected_requires_human_review": expected_requires_human_review,
+        "validation_expectation_source": "explicit_verdict" if expected_validation_verdict else "field_correctness",
+        "validation_correct": validation_correct,
+        "latency_seconds": round(latency_seconds, 6) if latency_seconds is not None else None,
         "pipeline_contract_passed": not validation_errors,
         "pipeline_contract_errors": validation_errors,
         **comparison,
@@ -571,11 +735,41 @@ def mean(values: Iterable[float]) -> float:
     return sum(values) / len(values) if values else 0.0
 
 
-def aggregate_metrics(sample_metrics: list[dict[str, Any]]) -> dict[str, Any]:
+def percentile(values: Iterable[float], percentile_value: float) -> float | None:
+    ordered = sorted(values)
+    if not ordered:
+        return None
+    if len(ordered) == 1:
+        return ordered[0]
+    rank = (len(ordered) - 1) * percentile_value
+    lower = math.floor(rank)
+    upper = math.ceil(rank)
+    if lower == upper:
+        return ordered[lower]
+    return ordered[lower] + (ordered[upper] - ordered[lower]) * (rank - lower)
+
+
+def aggregate_metrics(
+    sample_metrics: list[dict[str, Any]],
+    elapsed_seconds: float | None = None,
+) -> dict[str, Any]:
     total = len(sample_metrics)
     completed = sum(1 for item in sample_metrics if item.get("runtime_status") == COMPLETED_STATUS)
     contract_passed = sum(1 for item in sample_metrics if item.get("pipeline_contract_passed"))
     route_matches = sum(1 for item in sample_metrics if item.get("route_match"))
+    ocr_cer_values = [safe_float(item["ocr_cer"]) for item in sample_metrics if item.get("ocr_cer") is not None]
+    ocr_wer_values = [safe_float(item["ocr_wer"]) for item in sample_metrics if item.get("ocr_wer") is not None]
+    validation_values = [
+        bool(item["validation_correct"])
+        for item in sample_metrics
+        if item.get("validation_correct") is not None
+    ]
+    latency_values = [
+        safe_float(item["latency_seconds"])
+        for item in sample_metrics
+        if item.get("latency_seconds") is not None
+    ]
+    elapsed = max(0.0, elapsed_seconds or 0.0)
     return {
         "sample_count": total,
         "completed_count": completed,
@@ -588,7 +782,23 @@ def aggregate_metrics(sample_metrics: list[dict[str, Any]]) -> dict[str, Any]:
         "field_f1_mean": round(mean(safe_float(item.get("field_f1")) for item in sample_metrics), 6),
         "field_exact_match_mean": round(mean(safe_float(item.get("field_exact_match")) for item in sample_metrics), 6),
         "ocr_confidence_mean": round(mean(safe_float(item.get("ocr_confidence")) for item in sample_metrics), 6),
+        "ocr_reference_count": len(ocr_cer_values),
+        "ocr_cer_mean": round(mean(ocr_cer_values), 6) if ocr_cer_values else None,
+        "ocr_wer_mean": round(mean(ocr_wer_values), 6) if ocr_wer_values else None,
         "extraction_confidence_mean": round(mean(safe_float(item.get("extraction_confidence")) for item in sample_metrics), 6),
+        "validation_labeled_count": len(validation_values),
+        "validation_accuracy": (
+            round(sum(validation_values) / len(validation_values), 6) if validation_values else None
+        ),
+        "benchmark_elapsed_seconds": round(elapsed, 6),
+        "throughput_documents_per_minute": round(completed * 60 / elapsed, 6) if elapsed else None,
+        "latency_sample_count": len(latency_values),
+        "latency_p50_seconds": (
+            round(value, 6) if (value := percentile(latency_values, 0.50)) is not None else None
+        ),
+        "latency_p95_seconds": (
+            round(value, 6) if (value := percentile(latency_values, 0.95)) is not None else None
+        ),
         "human_review_rate": round(
             sum(1 for item in sample_metrics if item.get("requires_human_review")) / total,
             6,
@@ -604,7 +814,8 @@ def evaluate_quality_gate(config: BenchmarkConfig, aggregate: dict[str, Any], er
     def add_min(name: str, metric_key: str, threshold: float | None) -> None:
         if threshold is None:
             return
-        actual = safe_float(aggregate.get(metric_key))
+        raw_actual = aggregate.get(metric_key)
+        actual = safe_float(raw_actual) if raw_actual is not None else None
         checks.append(
             {
                 "name": name,
@@ -612,14 +823,15 @@ def evaluate_quality_gate(config: BenchmarkConfig, aggregate: dict[str, Any], er
                 "operator": ">=",
                 "threshold": threshold,
                 "actual": actual,
-                "passed": actual >= threshold,
+                "passed": actual is not None and actual >= threshold,
             }
         )
 
     def add_max(name: str, metric_key: str, threshold: float | None) -> None:
         if threshold is None:
             return
-        actual = safe_float(aggregate.get(metric_key))
+        raw_actual = aggregate.get(metric_key)
+        actual = safe_float(raw_actual) if raw_actual is not None else None
         checks.append(
             {
                 "name": name,
@@ -627,15 +839,33 @@ def evaluate_quality_gate(config: BenchmarkConfig, aggregate: dict[str, Any], er
                 "operator": "<=",
                 "threshold": threshold,
                 "actual": actual,
-                "passed": actual <= threshold,
+                "passed": actual is not None and actual <= threshold,
             }
         )
 
     add_min("completion_rate", "completion_rate", config.min_completion_rate)
+    add_min("sample_count", "sample_count", float(config.min_sample_count) if config.min_sample_count else None)
     add_min("pipeline_contract_pass_rate", "pipeline_contract_pass_rate", config.min_contract_pass_rate)
     add_min("route_accuracy", "route_accuracy", config.min_route_accuracy)
     add_min("field_f1_mean", "field_f1_mean", config.min_field_f1)
+    add_min(
+        "validation_accuracy",
+        "validation_accuracy",
+        config.min_validation_accuracy,
+    )
+    add_min(
+        "throughput_documents_per_minute",
+        "throughput_documents_per_minute",
+        config.min_throughput_documents_per_minute,
+    )
     add_max("human_review_rate", "human_review_rate", config.max_human_review_rate)
+    add_max("ocr_cer_mean", "ocr_cer_mean", config.max_ocr_cer)
+    add_max("ocr_wer_mean", "ocr_wer_mean", config.max_ocr_wer)
+    add_max(
+        "latency_p95_seconds",
+        "latency_p95_seconds",
+        config.max_p95_latency_seconds,
+    )
 
     failed_checks = [check for check in checks if not check["passed"]]
     passed = error_count == 0 and not failed_checks
@@ -672,6 +902,7 @@ def track_aggregate_evaluation(config: BenchmarkConfig, aggregate: dict[str, Any
             "benchmark_split": config.split,
             "benchmark_limit": config.limit,
             "benchmark_offset": config.offset,
+            "benchmark_concurrency": config.concurrency,
         },
         "tags": {
             "benchmark_suite": "dataset_benchmark",
@@ -686,6 +917,7 @@ def track_aggregate_evaluation(config: BenchmarkConfig, aggregate: dict[str, Any
 
 
 def run_sample(config: BenchmarkConfig, sample: BenchmarkSample, index: int) -> dict[str, Any]:
+    started = time.perf_counter()
     sample_dir = config.artifact_dir / "samples" / f"{index:04d}-{sample.sample_id}"
     sample_dir.mkdir(parents=True, exist_ok=True)
     image_path = write_sample_image(sample, sample_dir / "document")
@@ -709,6 +941,15 @@ def run_sample(config: BenchmarkConfig, sample: BenchmarkSample, index: int) -> 
             result_response=None,
             validation_errors=["dry_run"],
             runtime_status="DRY_RUN",
+            latency_seconds=time.perf_counter() - started,
+        )
+        metrics.update(
+            {
+                "ocr_cer": None,
+                "ocr_wer": None,
+                "validation_correct": None,
+                "latency_seconds": None,
+            }
         )
         write_json(sample_dir / "metrics.json", metrics)
         return metrics
@@ -741,6 +982,7 @@ def run_sample(config: BenchmarkConfig, sample: BenchmarkSample, index: int) -> 
         result_response=result_response,
         validation_errors=validation_errors,
         runtime_status=runtime_status,
+        latency_seconds=time.perf_counter() - started,
     )
     metrics["job_id"] = job_id
     metrics["workflow_id"] = submission.get("workflow_id") or final_status.get("workflow_id")
@@ -754,15 +996,33 @@ def run(config: BenchmarkConfig) -> dict[str, Any]:
 
     sample_metrics: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
-    for index, sample in enumerate(load_samples(config), start=1):
-        try:
-            sample_metrics.append(run_sample(config, sample, index))
-        except Exception as exc:  # noqa: BLE001
-            errors.append({"sample_id": sample.sample_id, "error": str(exc)})
-            write_json(config.artifact_dir / "errors.json", errors)
-            print(f"[{index}] sample_id={sample.sample_id} failed: {exc}", file=sys.stderr, flush=True)
+    samples = list(enumerate(load_samples(config), start=1))
+    benchmark_started = time.perf_counter()
 
-    aggregate = aggregate_metrics(sample_metrics)
+    def execute(index: int, sample: BenchmarkSample) -> tuple[int, BenchmarkSample, dict[str, Any] | None, Exception | None]:
+        try:
+            return index, sample, run_sample(config, sample, index), None
+        except Exception as exc:  # noqa: BLE001
+            return index, sample, None, exc
+
+    results: list[tuple[int, BenchmarkSample, dict[str, Any] | None, Exception | None]]
+    if config.concurrency == 1:
+        results = [execute(index, sample) for index, sample in samples]
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=config.concurrency) as executor:
+            futures = [executor.submit(execute, index, sample) for index, sample in samples]
+            results = [future.result() for future in concurrent.futures.as_completed(futures)]
+
+    for index, sample, metrics, run_error in sorted(results, key=lambda item: item[0]):
+        if run_error is None and metrics is not None:
+            sample_metrics.append(metrics)
+            continue
+        errors.append({"sample_id": sample.sample_id, "error": str(run_error)})
+        write_json(config.artifact_dir / "errors.json", errors)
+        print(f"[{index}] sample_id={sample.sample_id} failed: {run_error}", file=sys.stderr, flush=True)
+
+    elapsed_seconds = time.perf_counter() - benchmark_started
+    aggregate = aggregate_metrics(sample_metrics, elapsed_seconds)
     quality_gate = evaluate_quality_gate(config, aggregate, len(errors))
     summary = {
         "dataset": config.dataset,

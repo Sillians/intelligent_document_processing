@@ -72,3 +72,77 @@ groups:
         annotations:
           summary: "No recent non-health traffic for {{ $labels.service }}"
           description: "{{ $labels.service }} has only health/metrics traffic for 30 minutes. This can be normal in development, but may indicate an idle or broken pipeline in production."
+
+  - name: idp-queue-health
+    rules:
+      - alert: IDPTemporalQueueBacklogHigh
+        expr: sum by (namespace, task_queue) (idp_temporal_task_queue_backlog) > 10
+        for: 5m
+        labels:
+          severity: warning
+          category: queue-depth
+        annotations:
+          summary: "Temporal task queue {{ $labels.task_queue }} has a sustained backlog"
+          description: "The combined workflow and activity backlog has exceeded 10 tasks for 5 minutes. Check worker health, activity latency, and downstream service capacity."
+
+      - alert: IDPTemporalQueueMetricsStale
+        expr: time() - idp_temporal_task_queue_metrics_last_success_timestamp_seconds > 120
+        for: 2m
+        labels:
+          severity: critical
+          category: queue-depth
+        annotations:
+          summary: "Temporal task queue metrics are stale"
+          description: "The workflow orchestrator has not collected queue metrics for more than two minutes. Check Temporal connectivity and the worker metrics endpoint."
+
+      - alert: IDPTemporalQueueMetricsMissing
+        expr: absent(idp_temporal_task_queue_backlog)
+        for: 2m
+        labels:
+          severity: critical
+          category: queue-depth
+        annotations:
+          summary: "Temporal task queue metrics are missing"
+          description: "Prometheus has no Temporal backlog series. Check the workflow orchestrator metrics server and Prometheus target."
+
+  - name: idp-infrastructure
+    rules:
+      - alert: IDPNodeExporterDown
+        expr: up{job="node-exporter"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          category: disk-space
+        annotations:
+          summary: "Node Exporter is unavailable"
+          description: "Prometheus cannot scrape filesystem capacity metrics, so disk-space alerting is unavailable."
+
+      - alert: IDPDiskSpaceLow
+        expr: |
+          (
+            node_filesystem_avail_bytes{mountpoint="/",fstype!~"tmpfs|ramfs|squashfs"}
+            /
+            node_filesystem_size_bytes{mountpoint="/",fstype!~"tmpfs|ramfs|squashfs"}
+          ) < 0.15
+        for: 10m
+        labels:
+          severity: warning
+          category: disk-space
+        annotations:
+          summary: "Staging disk free space is below 15%"
+          description: "The root filesystem has less than 15% free space for 10 minutes. Prune unused images and artifacts or expand storage before the next deployment."
+
+      - alert: IDPDiskSpaceCritical
+        expr: |
+          (
+            node_filesystem_avail_bytes{mountpoint="/",fstype!~"tmpfs|ramfs|squashfs"}
+            /
+            node_filesystem_size_bytes{mountpoint="/",fstype!~"tmpfs|ramfs|squashfs"}
+          ) < 0.05
+        for: 5m
+        labels:
+          severity: critical
+          category: disk-space
+        annotations:
+          summary: "Staging disk free space is below 5%"
+          description: "The root filesystem is critically low on free space. Stop large image pulls and reclaim storage immediately."

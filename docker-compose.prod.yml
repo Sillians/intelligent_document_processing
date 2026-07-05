@@ -37,6 +37,11 @@ services:
     cpus: "${GATEWAY_CPUS:-0.5}"
     mem_limit: "${GATEWAY_MEM_LIMIT:-512m}"
     pids_limit: 256
+    volumes:
+      - ./infra/traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./infra/traefik/dynamic.production.yml:/etc/traefik/dynamic.yml:ro
+      - ./infra/traefik/tls/production.crt:/etc/traefik/tls/production.crt:ro
+      - ./infra/traefik/tls/production.key:/etc/traefik/tls/production.key:ro
 
   postgres:
     <<: *infra-defaults
@@ -148,6 +153,12 @@ services:
     cpus: "${PROMETHEUS_CPUS:-0.5}"
     mem_limit: "${PROMETHEUS_MEM_LIMIT:-1g}"
     pids_limit: 256
+
+  node-exporter:
+    <<: *infra-defaults
+    cpus: "${NODE_EXPORTER_CPUS:-0.25}"
+    mem_limit: "${NODE_EXPORTER_MEM_LIMIT:-256m}"
+    pids_limit: 128
 
   alertmanager:
     <<: *infra-defaults

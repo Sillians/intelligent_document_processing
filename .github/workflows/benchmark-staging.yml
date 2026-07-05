@@ -1,0 +1,129 @@
+name: Benchmark Staging
+
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: Number of CORD-v2 validation samples
+        required: true
+        default: "20"
+        type: string
+      concurrency:
+        description: Concurrent documents submitted to the staging pipeline
+        required: true
+        default: "1"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: idp-staging
+  cancel-in-progress: false
+
+jobs:
+  benchmark:
+    name: Quality and performance acceptance
+    runs-on: [self-hosted, staging]
+    timeout-minutes: 90
+    environment: staging
+
+    steps:
+      - name: Resolve deployed staging SHA
+        env:
+          STAGING_APP_DIR_OVERRIDE: ${{ vars.STAGING_APP_DIR }}
+        run: |
+          set -euo pipefail
+          if [ -n "${STAGING_APP_DIR_OVERRIDE}" ]; then
+            staging_app_dir="${STAGING_APP_DIR_OVERRIDE}"
+          elif [ "${RUNNER_OS:-}" = "macOS" ]; then
+            staging_app_dir="${HOME}/idp-staging"
+          else
+            staging_app_dir="/opt/idp-staging"
+          fi
+          marker="${staging_app_dir}/current/.idp-release-sha"
+          test -s "${marker}"
+          pipeline_version="$(tr -d '[:space:]' < "${marker}")"
+          if ! [[ "${pipeline_version}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "The deployed staging marker is not an immutable commit SHA: ${pipeline_version}" >&2
+            exit 1
+          fi
+          echo "PIPELINE_VERSION=${pipeline_version}" >> "${GITHUB_ENV}"
+
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.PIPELINE_VERSION }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install benchmark dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install "uv==0.9.4"
+          uv venv "${RUNNER_TEMP}/idp-benchmark-venv"
+          uv pip install \
+            --python "${RUNNER_TEMP}/idp-benchmark-venv/bin/python" \
+            "datasets>=3.1.0" \
+            "huggingface-hub>=0.36.2" \
+            "pillow==11.1.0"
+
+      - name: Run staging acceptance benchmark
+        env:
+          STAGING_PUBLIC_BASE_URL: ${{ secrets.STAGING_PUBLIC_BASE_URL }}
+          STAGING_SMOKE_API_KEY: ${{ secrets.STAGING_SMOKE_API_KEY }}
+          STAGING_TENANT_ID: ${{ vars.STAGING_TENANT_ID || 'default' }}
+          BENCHMARK_LIMIT: ${{ inputs.limit }}
+          BENCHMARK_CONCURRENCY: ${{ inputs.concurrency }}
+          HF_HOME: ${{ runner.temp }}/huggingface
+        run: |
+          set -euo pipefail
+          if [ -z "${STAGING_PUBLIC_BASE_URL}" ] || [ -z "${STAGING_SMOKE_API_KEY}" ]; then
+            echo "STAGING_PUBLIC_BASE_URL and STAGING_SMOKE_API_KEY are required." >&2
+            exit 1
+          fi
+          if ! [[ "${BENCHMARK_LIMIT}" =~ ^[1-9][0-9]*$ ]]; then
+            echo "limit must be a positive integer." >&2
+            exit 1
+          fi
+          if ! [[ "${BENCHMARK_CONCURRENCY}" =~ ^[1-8]$ ]]; then
+            echo "concurrency must be an integer from 1 through 8." >&2
+            exit 1
+          fi
+          artifact_dir="artifacts/staging/benchmarks/${GITHUB_RUN_ID}"
+          INGESTION_API_KEY="${STAGING_SMOKE_API_KEY}" \
+          TENANT_ID="${STAGING_TENANT_ID}" \
+          "${RUNNER_TEMP}/idp-benchmark-venv/bin/python" scripts/run_dataset_benchmark.py \
+            --dataset cord-v2 \
+            --split validation \
+            --limit "${BENCHMARK_LIMIT}" \
+            --concurrency "${BENCHMARK_CONCURRENCY}" \
+            --api-url "${STAGING_PUBLIC_BASE_URL}" \
+            --pipeline-version "${PIPELINE_VERSION}" \
+            --thresholds-file infra/staging/release_acceptance.json \
+            --no-track-evaluation \
+            --artifact-dir "${artifact_dir}"
+
+      - name: Publish benchmark summary
+        if: always()
+        run: |
+          summary="artifacts/staging/benchmarks/${GITHUB_RUN_ID}/summary.json"
+          if [ -f "${summary}" ]; then
+            {
+              echo "## Staging benchmark"
+              echo '```json'
+              cat "${summary}"
+              echo '```'
+            } >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
+      - name: Upload benchmark evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: staging-benchmark-${{ github.run_id }}
+          path: artifacts/staging/benchmarks/${{ github.run_id }}
+          if-no-files-found: error

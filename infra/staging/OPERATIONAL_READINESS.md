@@ -57,9 +57,9 @@ python3 scripts/staging_operational_drill.py backup \
   --env-file .env.staging
 ```
 
-**The drill captures:**
+**The drill captures encrypted payloads:**
 
-- `postgres.sql`
+- `postgres.sql.enc`
 - stateful Compose volume archives:
   - `postgres_data`
   - `seaweedfs_data`
@@ -71,9 +71,9 @@ python3 scripts/staging_operational_drill.py backup \
 
 **Passing criteria:**
 
-- Postgres dump is non-empty.
-- Every selected volume archive is created and non-empty.
-- Backup manifest records byte sizes and volume names.
+- Postgres and volume ciphertext is non-empty.
+- Plaintext dumps/archives are deleted after encryption.
+- Backup manifest records byte sizes, SHA-256 checksums, cipher, and volume names.
 
 
 ## 3. Restore Verification Drill
@@ -82,6 +82,7 @@ Run immediately after a backup drill.
 
 ```bash
 python3 scripts/staging_operational_drill.py restore-verify \
+  --env-file .env.staging \
   --backup-dir artifacts/staging/backup/<timestamp>
 ```
 
@@ -96,8 +97,9 @@ staging stack.
 
 **Passing criteria:**
 
-- `postgres.sql` exists and contains database dump markers.
-- At least one volume archive can be listed with `tar`.
+- encrypted payload checksums match,
+- decrypted Postgres content contains dump markers,
+- at least one decrypted volume archive can be listed with `tar`,
 - The restore verification manifest is written.
 
 A full destructive restore into an isolated host should be performed before
@@ -172,4 +174,3 @@ Recommended evidence window: the last 7 days, or every release candidate if rele
 
 
 ---
-

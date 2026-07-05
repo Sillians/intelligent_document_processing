@@ -1,0 +1,136 @@
+name: Harden Staging
+
+on:
+  workflow_dispatch:
+    inputs:
+      allow_loopback_http:
+        description: Record an explicit waiver for loopback-only HTTP instead of requiring HTTPS.
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: idp-staging
+  cancel-in-progress: false
+
+jobs:
+  harden:
+    name: Verify staging security and recoverability
+    runs-on: [self-hosted, staging]
+    timeout-minutes: 90
+    environment: staging
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Resolve deployed staging release
+        env:
+          STAGING_APP_DIR_OVERRIDE: ${{ vars.STAGING_APP_DIR }}
+        run: |
+          set -euo pipefail
+          if [ -n "${STAGING_APP_DIR_OVERRIDE}" ]; then
+            staging_app_dir="${STAGING_APP_DIR_OVERRIDE}"
+          elif [ "${RUNNER_OS:-}" = "macOS" ]; then
+            staging_app_dir="${HOME}/idp-staging"
+          else
+            staging_app_dir="/opt/idp-staging"
+          fi
+          marker="${staging_app_dir}/current/.idp-release-sha"
+          test -s "${marker}"
+          release_sha="$(tr -d '[:space:]' < "${marker}")"
+          [[ "${release_sha}" =~ ^[0-9a-f]{40}$ ]]
+          {
+            echo "STAGING_APP_DIR=${staging_app_dir}"
+            echo "RELEASE_SHA=${release_sha}"
+            echo "EVIDENCE_DIR=${GITHUB_WORKSPACE}/artifacts/staging/hardening/${GITHUB_RUN_ID}"
+          } >> "${GITHUB_ENV}"
+
+      - name: Validate hardening credentials
+        env:
+          STAGING_PUBLIC_BASE_URL: ${{ secrets.STAGING_PUBLIC_BASE_URL }}
+          STAGING_SMOKE_API_KEY: ${{ secrets.STAGING_SMOKE_API_KEY }}
+          STAGING_ISOLATION_API_KEY: ${{ secrets.STAGING_ISOLATION_API_KEY }}
+          STAGING_TENANT_ID: ${{ vars.STAGING_TENANT_ID || 'default' }}
+          STAGING_ISOLATION_TENANT_ID: ${{ vars.STAGING_ISOLATION_TENANT_ID || 'isolation-test' }}
+        run: |
+          set -euo pipefail
+          test -n "${STAGING_PUBLIC_BASE_URL}"
+          test -n "${STAGING_SMOKE_API_KEY}"
+          test -n "${STAGING_ISOLATION_API_KEY}"
+          test "${STAGING_SMOKE_API_KEY}" != "${STAGING_ISOLATION_API_KEY}"
+          test "${STAGING_TENANT_ID}" != "${STAGING_ISOLATION_TENANT_ID}"
+
+      - name: Validate staging hardening policy
+        run: |
+          set -euo pipefail
+          cd "${STAGING_APP_DIR}/current"
+          python3 scripts/production_preflight.py \
+            --env-file .env.staging \
+            --environment staging
+
+      - name: Verify tenant isolation, transport, and audit logs
+        env:
+          STAGING_PUBLIC_BASE_URL: ${{ secrets.STAGING_PUBLIC_BASE_URL }}
+          STAGING_SMOKE_API_KEY: ${{ secrets.STAGING_SMOKE_API_KEY }}
+          STAGING_ISOLATION_API_KEY: ${{ secrets.STAGING_ISOLATION_API_KEY }}
+          STAGING_TENANT_ID: ${{ vars.STAGING_TENANT_ID || 'default' }}
+          STAGING_ISOLATION_TENANT_ID: ${{ vars.STAGING_ISOLATION_TENANT_ID || 'isolation-test' }}
+          ALLOW_LOOPBACK_HTTP: ${{ inputs.allow_loopback_http }}
+        run: |
+          set -euo pipefail
+          cd "${STAGING_APP_DIR}/current"
+          args=(
+            hardening
+            --env-file .env.staging
+            --api-url "${STAGING_PUBLIC_BASE_URL}"
+            --primary-api-key "${STAGING_SMOKE_API_KEY}"
+            --primary-tenant "${STAGING_TENANT_ID}"
+            --secondary-api-key "${STAGING_ISOLATION_API_KEY}"
+            --secondary-tenant "${STAGING_ISOLATION_TENANT_ID}"
+            --artifact-dir "${EVIDENCE_DIR}/security"
+          )
+          if [ "${ALLOW_LOOPBACK_HTTP}" = "true" ]; then
+            args+=(--allow-loopback-http)
+          fi
+          python3 scripts/staging_operational_drill.py "${args[@]}"
+
+      - name: Create and verify encrypted backup
+        run: |
+          set -euo pipefail
+          cd "${STAGING_APP_DIR}/current"
+          backup_dir="${EVIDENCE_DIR}/backup"
+          python3 scripts/staging_operational_drill.py backup \
+            --env-file .env.staging \
+            --artifact-dir "${backup_dir}"
+          python3 scripts/staging_operational_drill.py restore-verify \
+            --env-file .env.staging \
+            --backup-dir "${backup_dir}"
+
+      - name: Apply retention policy after verified backup
+        run: |
+          set -euo pipefail
+          cd "${STAGING_APP_DIR}/current"
+          compose=(docker compose --env-file .env.staging -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.staging.yml)
+          "${compose[@]}" exec -T ingestion-service \
+            python scripts/enforce_retention.py --apply \
+            > "${EVIDENCE_DIR}/retention.json"
+
+      - name: Remove backup payloads after retaining manifests
+        if: always()
+        run: |
+          find "${EVIDENCE_DIR}/backup" -type f \
+            ! -name 'backup_manifest.json' \
+            ! -name 'restore_verify_manifest.json' \
+            -delete 2>/dev/null || true
+
+      - name: Upload staging hardening evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: staging-hardening-${{ github.run_id }}
+          path: artifacts/staging/hardening/${{ github.run_id }}
+          if-no-files-found: error

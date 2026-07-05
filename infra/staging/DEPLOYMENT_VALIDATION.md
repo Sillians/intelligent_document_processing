@@ -331,17 +331,17 @@ should return the existing job with `deduplicated: true`.
 
 ### OCR failure and HITL routing
 
-The staging overlay intentionally forces deterministic OCR fallback. First run
-a representative low-confidence document and inspect:
+Staging uses real CPU Tesseract OCR with `OCR_FORCE_FALLBACK=false`. First run a
+representative low-confidence document and inspect:
 
 ```bash
 python3 -m json.tool "artifacts/staging/documents/$IDP_IMAGE_TAG/<sample>/summary.json"
 python3 -m json.tool "artifacts/staging/documents/$IDP_IMAGE_TAG/<sample>/result.json"
 ```
 
-Pass when fallback is visible as `ocr_fallback_used: true`, the workflow still
-reaches `COMPLETED`, and unsafe output is routed to
-`pending_human_review` with a review task rather than silently delivered.
+Pass when normal documents report `ocr_fallback_used: false`. Low-confidence or
+incomplete extraction must route to `pending_human_review` rather than silently
+delivering unsafe output.
 
 To test network-level OCR fallback, stop `ocr-service`, submit a unique
 document, and start the service again:
@@ -354,7 +354,9 @@ document, and start the service again:
 "${compose[@]}" up -d ocr-service
 ```
 
-`ORCHESTRATOR_ENABLE_OCR_NETWORK_FALLBACK` must remain enabled for this test.
+This is a resilience drill only. Temporarily enable
+`ORCHESTRATOR_ENABLE_OCR_NETWORK_FALLBACK` for the drill, then restore it to
+`false` as required by the hardening gate.
 Pass when the result records OCR fallback, the document takes the safe review
 path, and `ocr-service` returns healthy after restart.
 
@@ -424,12 +426,12 @@ known-good SHA or be redeployed to the candidate SHA.
 
 ## Gate 7: Enable and Validate Observability
 
-The current staging deployment workflow does not start Prometheus, Alertmanager,
-or Grafana. Start them on the staging host:
+The staging deployment workflow starts Prometheus, Alertmanager, Grafana, and
+Node Exporter and verifies their health automatically. To start them manually:
 
 ```bash
-"${compose[@]}" up -d prometheus alertmanager grafana
-"${compose[@]}" ps prometheus alertmanager grafana
+"${compose[@]}" up -d prometheus alertmanager grafana node-exporter
+"${compose[@]}" ps prometheus alertmanager grafana node-exporter
 
 curl -fsS http://127.0.0.1:9090/-/healthy
 curl -fsS http://127.0.0.1:9093/-/healthy
@@ -462,6 +464,15 @@ curl -fsSG http://127.0.0.1:9090/api/v1/query \
   --data-urlencode 'query=up{tier="idp-pipeline"}'
 ```
 
+Verify the complete signal and rule set:
+
+```bash
+python3 scripts/staging_operational_drill.py observability \
+  --prometheus-url http://127.0.0.1:9090 \
+  --alertmanager-url http://127.0.0.1:9093 \
+  --grafana-url http://127.0.0.1:3000
+```
+
 Run the alert drill:
 
 ```bash
@@ -475,17 +486,18 @@ python3 scripts/staging_operational_drill.py alert \
 
 Pass when:
 
-- the smoke summary reports at least one live IDP target,
+- all ten IDP pipeline targets are live,
+- Temporal workflow/activity backlog metrics are queryable,
+- root filesystem capacity metrics are queryable,
 - Grafana loads the provisioned IDP dashboard,
 - `IDPServiceDown` fires for the stopped service and resolves after recovery,
 - the configured notification receiver receives the test alert,
 - health, HTTP 5xx rate, client error rate, and p95 latency rules evaluate
   without errors.
 
-The current `infra/prometheus/alerts.yml` does not define queue-depth or
-disk-space alerts. Those two alert rules and their metrics must be implemented
-and tested before claiming the complete observability gate requested for
-production readiness.
+Promtool unit tests in `infra/prometheus/alerts.test.yml` verify service-health,
+error-rate, p95-latency, queue-depth, and disk-space alert behavior. CI executes
+them with the same pinned Prometheus image used by the stack.
 
 ## Gate 8: Benchmark Quality and Performance
 
@@ -495,9 +507,13 @@ Start with explicit release thresholds. The benchmark runner can enforce:
 - minimum pipeline-contract pass rate,
 - minimum route accuracy,
 - minimum field F1,
+- minimum validation accuracy,
+- minimum throughput,
 - maximum human-review rate.
+- maximum OCR CER and WER,
+- maximum p95 end-to-end latency.
 
-Example only; replace these values with approved baselines:
+Run the committed bootstrap profile:
 
 ```bash
 INGESTION_API_KEY="$STAGING_SMOKE_API_KEY" \
@@ -506,15 +522,17 @@ TENANT_ID="$STAGING_TENANT_ID" \
   --dataset cord-v2 \
   --split validation \
   --limit 20 \
+  --concurrency 1 \
   --api-url "$STAGING_PUBLIC_BASE_URL" \
   --no-track-evaluation \
   --pipeline-version "$IDP_IMAGE_TAG" \
-  --min-completion-rate 1.0 \
-  --min-contract-pass-rate 1.0 \
-  --min-route-accuracy 0.90 \
-  --min-field-f1 0.80 \
-  --max-human-review-rate 0.30
+  --thresholds-file infra/staging/release_acceptance.json
 ```
+
+The same gate is available under GitHub Actions as `Benchmark Staging`. Enter
+the deployed image SHA as `pipeline_version`; its artifact is the release
+acceptance evidence. The committed profile is intentionally marked `bootstrap`
+until its values are approved from a representative staging baseline.
 
 Record:
 
@@ -530,11 +548,48 @@ Do not use the example threshold values as production acceptance criteria
 without an approved baseline. Performance comparisons are valid only when the
 dataset, concurrency, OCR mode, and staging resources are held constant.
 
-Because staging currently forces OCR fallback, production OCR quality cannot be
-approved from this profile. Repeat the quality gate with the intended OCR engine
-on suitable infrastructure before production promotion.
+The current profile benchmarks real CPU Tesseract. It does not approve
+PaddleOCR/Detectron2 behavior. Publish and benchmark those exact images on
+suitable infrastructure before changing the production engine profile.
 
-## Gate 9: Hardening and Promotion Checklist
+## Gate 9: Staging Hardening
+
+Add `infra/staging/hardening.env.example` to the GitHub `STAGING_ENV_FILE`
+environment secret and configure:
+
+```text
+STAGING_ISOLATION_API_KEY=<second-high-entropy-key>
+STAGING_ISOLATION_TENANT_ID=isolation-test
+```
+
+The second key must also appear in `INGESTION_API_KEYS` mapped to the isolation
+tenant. Run the manual `Harden Staging` GitHub Actions workflow. It verifies:
+
+- credential rotation timestamps are current,
+- invalid, mismatched-tenant, and cross-tenant requests return `401`, `403`, and
+  `404` respectively,
+- operator audit data is not exposed through the public gateway,
+- the accepted job has persisted audit events in Postgres,
+- transport is HTTPS unless an explicit loopback-only waiver is recorded,
+- encrypted backup creation and decrypting archive verification succeed,
+- raw, derived, and audit retention is applied after the verified backup.
+
+Generate independent credentials with:
+
+```bash
+openssl rand -base64 48
+```
+
+Rotate API keys with overlap: add the new key, deploy, migrate clients, run the
+hardening workflow, then remove the old key and update
+`INGESTION_KEYS_ROTATED_AT`.
+
+For Postgres, use `psql`'s interactive `\password` command so the new password
+does not enter shell history. Update `POSTGRES_PASSWORD`, restart dependent
+services during a maintenance window, then update
+`DATABASE_CREDENTIALS_ROTATED_AT`.
+
+## Gate 10: Hardening and Promotion Checklist
 
 Before promotion, verify:
 
@@ -543,6 +598,8 @@ Before promotion, verify:
 - external traffic uses encrypted transport,
 - backup and restore-verification drills pass,
 - retention settings and audit records meet policy,
+- the `Harden Staging` workflow has recent passing evidence,
+- the `Benchmark Staging` artifact references the exact deployed SHA,
 - no secrets appear in logs or evidence artifacts,
 - rollback and alert drills have recent passing evidence,
 - production uses separate infrastructure, secrets, and persistent storage,
@@ -556,10 +613,11 @@ python3 scripts/staging_operational_drill.py backup \
   --env-file .env.staging
 
 python3 scripts/staging_operational_drill.py restore-verify \
+  --env-file .env.staging \
   --backup-dir "artifacts/staging/backup/<timestamp>"
 ```
 
-Promotion is approved only when Gates 1 through 9 have the evidence required by
+Promotion is approved only when Gates 1 through 10 have the evidence required by
 the release policy. Recommended evidence age is seven days or less, or one
 complete validation set per release candidate when releases are less frequent.
 

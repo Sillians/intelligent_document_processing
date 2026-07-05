@@ -5,5 +5,32 @@ services:
   workflow-orchestrator:
     image: ${IDP_IMAGE_REGISTRY:?set IDP_IMAGE_REGISTRY}/workflow-orchestrator:${IDP_IMAGE_TAG:?set IDP_IMAGE_TAG}
 
+  preprocess-worker:
+    image: ${IDP_IMAGE_REGISTRY:?set IDP_IMAGE_REGISTRY}/preprocess-worker:${IDP_IMAGE_TAG:?set IDP_IMAGE_TAG}
+
+  ocr-service:
+    image: ${IDP_IMAGE_REGISTRY:?set IDP_IMAGE_REGISTRY}/ocr-service:${IDP_IMAGE_TAG:?set IDP_IMAGE_TAG}
+
+  layout-service:
+    image: ${IDP_IMAGE_REGISTRY:?set IDP_IMAGE_REGISTRY}/layout-service:${IDP_IMAGE_TAG:?set IDP_IMAGE_TAG}
+
+  classifier-router-service:
+    image: ${IDP_IMAGE_REGISTRY:?set IDP_IMAGE_REGISTRY}/classifier-router-service:${IDP_IMAGE_TAG:?set IDP_IMAGE_TAG}
+
+  extraction-service:
+    image: ${IDP_IMAGE_REGISTRY:?set IDP_IMAGE_REGISTRY}/extraction-service:${IDP_IMAGE_TAG:?set IDP_IMAGE_TAG}
+
+  validation-service:
+    image: ${IDP_IMAGE_REGISTRY:?set IDP_IMAGE_REGISTRY}/validation-service:${IDP_IMAGE_TAG:?set IDP_IMAGE_TAG}
+
+  human-review-console:
+    image: ${IDP_IMAGE_REGISTRY:?set IDP_IMAGE_REGISTRY}/human-review-console:${IDP_IMAGE_TAG:?set IDP_IMAGE_TAG}
+
   delivery-service:
     image: ${IDP_IMAGE_REGISTRY:?set IDP_IMAGE_REGISTRY}/delivery-service:${IDP_IMAGE_TAG:?set IDP_IMAGE_TAG}
+
+  evaluation-service:
+    image: ${IDP_IMAGE_REGISTRY:?set IDP_IMAGE_REGISTRY}/evaluation-service:${IDP_IMAGE_TAG:?set IDP_IMAGE_TAG}
+
+  mlflow:
+    image: ${IDP_IMAGE_REGISTRY:?set IDP_IMAGE_REGISTRY}/mlflow:${IDP_IMAGE_TAG:?set IDP_IMAGE_TAG}

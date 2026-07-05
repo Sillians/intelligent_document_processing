@@ -29,6 +29,9 @@ Execute the end-to-end IDP pipeline in Temporal, enforce stage contracts, apply 
    - Non-retryable downstream client/contract failures.
 8. Worker runtime controls:
    - Configurable concurrency, cache, identity, and graceful shutdown.
+9. Queue observability:
+   - Prometheus endpoint on internal port `9091`.
+   - Approximate Temporal workflow/activity backlog and poller gauges.
 
 ## Scope
 - Orchestrate deterministic workflow execution.
@@ -105,16 +108,23 @@ docker compose logs -f workflow-orchestrator
 - `TEMPORAL_WORKER_MAX_CONCURRENT_WORKFLOW_TASKS`
 - `TEMPORAL_WORKER_MAX_CONCURRENT_ACTIVITIES`
 - `TEMPORAL_WORKER_GRACEFUL_SHUTDOWN_SECONDS`
+- `WORKFLOW_METRICS_PORT` (default `9091`)
+- `WORKFLOW_METRICS_INTERVAL_SECONDS` (default `15`)
 
 ## Observability
 - Structured worker logs for startup, completion, and fatal failures.
 - Stage failure context propagated through workflow/activity errors.
 - Temporal UI exposes lifecycle and retries per workflow execution.
+- `GET :9091/metrics` exposes `idp_temporal_task_queue_backlog`,
+  `idp_temporal_task_queue_pollers`, and the last successful collection time.
+- Backlog is Temporal's approximate `backlog_count_hint`, collected separately
+  for workflow and activity tasks.
 
 ## Tests
 Implemented unit tests for contract/branching logic and retry classification:
 - [`workflow_orchestrator/tests/test_pipeline.py`](./tests/test_pipeline.py)
 - [`workflow_orchestrator/tests/test_activities.py`](./tests/test_activities.py)
+- [`workflow_orchestrator/tests/test_metrics.py`](./tests/test_metrics.py)
 
 Run tests:
 ```bash
@@ -126,6 +136,7 @@ Run tests:
 - [`workflow_orchestrator/app/activities.py`](./app/activities.py)
 - [`workflow_orchestrator/app/worker.py`](./app/worker.py)
 - [`workflow_orchestrator/app/pipeline.py`](./app/pipeline.py)
+- [`workflow_orchestrator/app/metrics.py`](./app/metrics.py)
 - [`workflow_orchestrator/tests/test_pipeline.py`](./tests/test_pipeline.py)
 - [`workflow_orchestrator/tests/test_activities.py`](./tests/test_activities.py)
 
@@ -136,3 +147,4 @@ Run tests:
 ## Change Log
 - 2026-05-21: Implemented production-grade Temporal orchestration with strict contracts, deterministic stage-payload builders, resilient activity HTTP error semantics, configurable worker concurrency/shutdown controls, and workflow-orchestrator unit tests.
 - 2026-05-27: Added resilient OCR-network fallback path that persists deterministic OCR artifact when OCR service is unreachable or returns transient 5xx, controlled by `ORCHESTRATOR_ENABLE_OCR_NETWORK_FALLBACK`.
+- 2026-07-03: Added Prometheus Temporal task-queue backlog, poller, and collection-freshness metrics on internal port `9091`.

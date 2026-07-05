@@ -1,6 +1,9 @@
 # Production Operations Runbook
 
-This runbook hardens the existing Docker Compose architecture before any Kubernetes migration. Compose remains the single-host deployment mechanism; Minikube or Kubernetes should only come after these contracts are proven.
+This runbook deploys the Compose architecture to a dedicated persistent
+production host. The local self-hosted staging machine is never a valid
+production target. Managed Postgres/object storage or a production Kubernetes
+platform remains the preferred next step when high availability is required.
 
 ## Production Contract
 
@@ -9,9 +12,12 @@ This runbook hardens the existing Docker Compose architecture before any Kuberne
 - `ingestion-service` stays internal-only in production; do not publish it directly.
 - All other ports stay bound to localhost, a private interface, or a VPN-only reverse proxy.
 - Every stateful service has an owner, backup schedule, and restore test.
+- Production uses dedicated persistent storage and independent credentials.
 - Secrets come from `.env.production` or a host secret manager, never from `.env.example`.
 - Pipeline services stay stateless; artifacts live in S3-compatible storage and metadata lives in Postgres.
 - Deployments pass preflight, smoke e2e, and observability checks before promotion.
+- Promotion uses the exact 40-character SHA benchmarked in staging.
+- HTTP redirects permanently to HTTPS; Traefik requires TLS 1.2 or newer.
 
 ## Files
 
@@ -19,6 +25,10 @@ This runbook hardens the existing Docker Compose architecture before any Kuberne
 - `docker-compose.prod.yml`: production override for bind addresses, container hardening, log rotation, pids, CPU, and memory envelopes.
 - `docker-compose.release.yml`: release-image override for SHA-tagged GHCR images.
 - `scripts/production_preflight.py`: fail-fast checks for unsafe production settings.
+- `scripts/verify_promotion_evidence.py`: validates exact-SHA benchmark evidence.
+- `scripts/deploy_release.sh`: deploys the full release and validates image revision labels.
+- `scripts/enforce_retention.py`: applies raw, derived, metadata, and audit retention.
+- `infra/traefik/dynamic.production.yml`: production TLS and HTTPS-only routing.
 - `infra/api/PUBLIC_API.md`: public API contract for client/API consumers.
 - `infra/traefik/traefik.yml`: Traefik static gateway configuration.
 - `infra/production/DCompose-k8s.md`: Kubernetes migration notes; Minikube is a rehearsal target only.
@@ -36,27 +46,31 @@ chmod 600 .env.production
 
 2. Replace every `changeme` value with high-entropy secrets from a password manager or secret manager.
 
-3. Keep public access narrow. The production overlay exposes Traefik as the API gateway and removes direct host publishing from `ingestion-service`.
+3. Store the certificate and private key in the GitHub `production`
+   environment secrets `PRODUCTION_TLS_CERT` and `PRODUCTION_TLS_KEY`.
 
-4. Run preflight:
+4. Keep public access narrow. The production overlay exposes Traefik as the API
+   gateway and removes direct host publishing from `ingestion-service`.
+
+5. Run preflight:
 
 ```bash
 python3 scripts/production_preflight.py --env-file .env.production
 ```
 
-5. Build and start:
+6. Build and start:
 
 ```bash
 docker compose --env-file .env.production -f docker-compose.yml -f docker-compose.prod.yml up -d --build
 ```
 
-6. Confirm health:
+7. Confirm health:
 
 ```bash
 docker compose --env-file .env.production -f docker-compose.yml -f docker-compose.prod.yml ps
 ```
 
-7. Run the live smoke test:
+8. Run the live smoke test:
 
 ```bash
 INGESTION_API_KEY=<production-smoke-api-key> TENANT_ID=default API_URL=https://<public-idp-host> ./scripts/run_gateway_e2e.sh
@@ -67,6 +81,8 @@ INGESTION_API_KEY=<production-smoke-api-key> TENANT_ID=default API_URL=https://<
 - `INGESTION_REQUIRE_AUTH=true` is mandatory.
 - `INGESTION_API_KEYS` must use `api-key:tenant-id` pairs with high-entropy keys.
 - Rotate ingestion keys by adding the new key, updating clients, then removing the old key.
+- Keep `INGESTION_KEYS_ROTATED_AT` and `DATABASE_CREDENTIALS_ROTATED_AT`
+  current; preflight rejects credentials older than `CREDENTIAL_MAX_AGE_DAYS`.
 - Traefik handles TLS termination, path allowlisting, request body limits, rate limits, response security headers, health checks, and JSON access logs.
 - API key validation remains in `ingestion-service`. For JWT/OIDC at the gateway, add a forward-auth service and Traefik middleware.
 - Keep `DELIVERY_WEBHOOK_REQUIRE_SIGNATURE=true`.
@@ -76,32 +92,43 @@ INGESTION_API_KEY=<production-smoke-api-key> TENANT_ID=default API_URL=https://<
 - Change Grafana, Postgres, S3, Label Studio, SMTP, webhook, and VLM credentials before first boot.
 - Do not expose Postgres, Redis, SeaweedFS, Temporal, Prometheus, Alertmanager, Grafana, MLflow, or Label Studio directly to the internet.
 - Run the app images as the non-root `app` user.
-- Use TLS at the reverse proxy or load balancer.
+- Production TLS certificate/key secrets are mandatory; unpinned SSH host keys
+  and non-HTTPS public URLs are rejected.
 - Store raw and derived document artifacts in tenant-scoped keys and keep audit events enabled.
 - Do not log API keys, raw document content, extracted PII, webhook secrets, or Label Studio tokens.
 
 ## Deployment Flow
 
-1. Confirm the desired SHA passed GitHub Actions CI, release-candidate image
-   publication, staging deployment, and staging operational readiness checks.
-2. Confirm the GitHub `production` environment has required reviewers.
-3. Run `.github/workflows/deploy-production.yml` manually with:
-   - `image_tag`: the immutable release-candidate SHA tag,
-   - `staging_evidence_url`: URL to approved staging smoke/readiness evidence,
+1. Confirm the desired SHA passed CI, Release Candidate, Deploy Staging,
+   Harden Staging, and Benchmark Staging.
+2. Change `infra/staging/release_acceptance.json` from `bootstrap` to `approved`
+   only after reviewing a representative baseline. Because that changes the
+   source SHA, redeploy and benchmark the resulting SHA.
+3. Configure the GitHub `production` environment with required reviewers,
+   enable **Prevent self-review**, restrict deployment branches to `main`, and
+   disable administrator bypass. See
+   [GitHub deployment environments](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments).
+4. Run `.github/workflows/deploy-production.yml` manually with:
+   - `release_sha`: the exact benchmarked 40-character SHA,
+   - `staging_benchmark_run_id`: the passing Benchmark Staging run ID,
    - `change_ticket`: optional change or incident reference,
    - `run_predeploy_backup`: keep enabled unless an approved maintenance plan
      provides equivalent backup evidence.
-4. Approve the workflow from the GitHub `production` environment gate.
-5. The workflow runs production preflight, Compose validation, optional backup,
-   deployment, production smoke, and artifact upload.
-6. Watch startup if manual inspection is needed:
+     For the first deployment only, set it to `false` because no previous
+     `current` release exists to back up.
+5. The unprotected verification job downloads the benchmark artifact and
+   validates the SHA, approved thresholds, sample count, and every gate.
+6. A required reviewer approves the protected production job.
+7. The workflow installs TLS, runs preflight and encrypted backup, deploys all
+   release images, verifies OCI revision labels, and runs production smoke.
+8. Watch startup if manual inspection is needed:
 
 ```bash
 docker compose --env-file .env.production -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.release.yml ps
 docker compose --env-file .env.production -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.release.yml logs --tail=100 ingestion-service workflow-orchestrator
 ```
 
-7. Record the deployed git SHA, env version, GitHub workflow run, and artifact
+9. Record the deployed git SHA, env version, GitHub workflow run, and artifact
    path.
 
 ## Rollback
@@ -134,12 +161,37 @@ Minimum policy:
 - Retain enough history to satisfy compliance and customer recovery requirements.
 - Verify both metadata and artifacts during restore; a job record without matching object storage is not a valid recovery.
 
-Suggested backup commands must be adapted to your storage provider and maintenance window:
+The repository backup drill encrypts every dump/archive using
+`BACKUP_ENCRYPTION_KEY` and deletes plaintext output:
 
 ```bash
-docker compose --env-file .env.production -f docker-compose.yml -f docker-compose.prod.yml exec postgres pg_dumpall -U "$POSTGRES_USER" > backups/postgres-$(date +%Y%m%d%H%M).sql
-docker run --rm -v idp-production-stack_seaweedfs_data:/data:ro -v "$PWD/backups:/backup" busybox tar czf /backup/seaweedfs-$(date +%Y%m%d%H%M).tgz /data
+python3 scripts/staging_operational_drill.py backup \
+  --env-file .env.production \
+  --artifact-dir artifacts/production/backup/manual
+
+python3 scripts/staging_operational_drill.py restore-verify \
+  --env-file .env.production \
+  --backup-dir artifacts/production/backup/manual
 ```
+
+Apply retention only after a verified backup:
+
+```bash
+docker compose --env-file .env.production \
+  -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.release.yml \
+  exec -T ingestion-service python scripts/enforce_retention.py --apply
+```
+
+## OCR Production Profile
+
+The currently published multi-architecture release uses real CPU Tesseract,
+not deterministic fallback. Production must keep `OCR_FORCE_FALLBACK=false` and
+`ORCHESTRATOR_ENABLE_OCR_NETWORK_FALLBACK=false`.
+
+Do not switch `OCR_BACKEND=paddle` until suitable CPU/GPU infrastructure can
+publish that image profile and run the same hardening and benchmark gates
+against the exact production image SHA. A model name in an environment file is
+not evidence that the required engine exists in the image.
 
 ## Scaling
 

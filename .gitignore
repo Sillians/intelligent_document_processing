@@ -153,6 +153,8 @@ activemq-data/
 .env
 .env.staging
 .env.production
+infra/traefik/tls/production.crt
+infra/traefik/tls/production.key
 .env.local
 .env.*.local
 .envrc
