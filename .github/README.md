@@ -88,6 +88,24 @@ File: `.github/workflows/deploy-staging.yml`
 This workflow deploys the release candidate to the GitHub `staging` environment.
 Use environment protection rules if staging deploys should require approval.
 
+Before copying the release into `${STAGING_APP_DIR}`, the workflow verifies that
+every required service image exists in GHCR under the immutable SHA tag. If the
+run fails with missing images such as:
+
+```text
+ghcr.io/<owner>/<repo>/preprocess-worker:<sha>: not found
+```
+
+the SHA has not been fully published by `Release Candidate`. Run
+`Release Candidate` for that exact commit SHA first, or rerun `Deploy Staging`
+with an `image_tag` copied from a successful `release-candidate-manifest`
+artifact. Do not use `staging-candidate` for validation or promotion evidence;
+it is intentionally mutable.
+
+For manual deploys, `image_tag` is also used as the checked-out source ref. This
+keeps the compose files, deploy scripts, and container images aligned to the same
+immutable revision.
+
 ### Benchmark Staging
 
 File: `.github/workflows/benchmark-staging.yml`

@@ -1,0 +1,102 @@
+rule_files:
+  - alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  - name: service availability
+    interval: 1m
+    input_series:
+      - series: 'up{tier="idp-pipeline",instance="delivery-service:8017"}'
+        values: "0x4"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: IDPServiceDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              category: availability
+              tier: idp-pipeline
+              instance: delivery-service:8017
+            exp_annotations:
+              summary: "IDP service delivery-service:8017 is down"
+              description: "Prometheus has not been able to scrape delivery-service:8017 for at least 2 minutes. Check docker compose service health and application logs."
+
+  - name: server error rate
+    interval: 1m
+    input_series:
+      - series: 'http_requests_total{service="ocr-service",status="500"}'
+        values: "0+60x7"
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: IDPHigh5xxRate
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              category: errors
+              service: ocr-service
+            exp_annotations:
+              summary: "High 5xx rate on ocr-service"
+              description: "ocr-service is returning more than 0.05 5xx responses/sec over 5 minutes. Inspect service logs and downstream dependencies."
+
+  - name: queue backlog
+    interval: 1m
+    input_series:
+      - series: 'idp_temporal_task_queue_backlog{namespace="default",task_queue="idp-pipeline",task_type="workflow"}'
+        values: "11x7"
+      - series: 'idp_temporal_task_queue_backlog{namespace="default",task_queue="idp-pipeline",task_type="activity"}'
+        values: "2x7"
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: IDPTemporalQueueBacklogHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              category: queue-depth
+              namespace: default
+              task_queue: idp-pipeline
+            exp_annotations:
+              summary: "Temporal task queue idp-pipeline has a sustained backlog"
+              description: "The combined workflow and activity backlog has exceeded 10 tasks for 5 minutes. Check worker health, activity latency, and downstream service capacity."
+
+  - name: request latency
+    interval: 1m
+    input_series:
+      - series: 'http_request_duration_seconds_bucket{service="ocr-service",le="5"}'
+        values: "0+1x12"
+      - series: 'http_request_duration_seconds_bucket{service="ocr-service",le="10"}'
+        values: "0+10x12"
+      - series: 'http_request_duration_seconds_bucket{service="ocr-service",le="+Inf"}'
+        values: "0+10x12"
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: IDPHighP95Latency
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              category: latency
+              service: ocr-service
+            exp_annotations:
+              summary: "High p95 latency on ocr-service"
+              description: "ocr-service p95 latency is above 5 seconds for 10 minutes. Check CPU-bound processing, downstream calls, storage latency, and worker saturation."
+
+  - name: disk space
+    interval: 1m
+    input_series:
+      - series: 'node_filesystem_avail_bytes{mountpoint="/",fstype="ext4",instance="node-exporter:9100"}'
+        values: "10x12"
+      - series: 'node_filesystem_size_bytes{mountpoint="/",fstype="ext4",instance="node-exporter:9100"}'
+        values: "100x12"
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: IDPDiskSpaceLow
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              category: disk-space
+              mountpoint: /
+              fstype: ext4
+              instance: node-exporter:9100
+            exp_annotations:
+              summary: "Staging disk free space is below 15%"
+              description: "The root filesystem has less than 15% free space for 10 minutes. Prune unused images and artifacts or expand storage before the next deployment."

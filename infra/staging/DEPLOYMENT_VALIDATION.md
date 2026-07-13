@@ -103,6 +103,30 @@ The `Release Candidate` workflow must succeed before the automatic staging
 workflow runs. For a manual deployment, dispatch `Deploy Staging` and supply
 the exact SHA tag to test.
 
+`Deploy Staging` preflights GHCR before it mutates the local staging release. If
+it reports missing images for a SHA, that SHA is not deployable yet. Confirm that
+`Release Candidate` completed successfully for the same SHA and that its
+`release-candidate-manifest` artifact lists every required service image:
+
+```text
+ingestion-service
+workflow-orchestrator
+preprocess-worker
+ocr-service
+layout-service
+classifier-router-service
+extraction-service
+validation-service
+human-review-console
+delivery-service
+evaluation-service
+mlflow
+```
+
+For manual deploys, use only the immutable SHA from that manifest. The mutable
+`staging-candidate` tag is useful for quick inspection but is not acceptable for
+staging validation evidence.
+
 On the staging host, confirm the running image references:
 
 ```bash

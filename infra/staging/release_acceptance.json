@@ -1,0 +1,21 @@
+{
+  "profile": "staging-cpu-ocr-v1",
+  "status": "bootstrap",
+  "dataset": "cord-v2",
+  "split": "validation",
+  "concurrency": 1,
+  "notes": "Bootstrap thresholds for the Apple Silicon CPU staging profile. Replace status with approved after a representative baseline and review.",
+  "thresholds": {
+    "min_sample_count": 20,
+    "min_completion_rate": 0.95,
+    "min_contract_pass_rate": 0.95,
+    "min_route_accuracy": 0.85,
+    "min_field_f1": 0.7,
+    "min_validation_accuracy": 0.85,
+    "min_throughput_documents_per_minute": 0.5,
+    "max_human_review_rate": 0.5,
+    "max_ocr_cer": 0.3,
+    "max_ocr_wer": 0.45,
+    "max_p95_latency_seconds": 180
+  }
+}

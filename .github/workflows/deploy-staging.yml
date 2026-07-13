@@ -24,7 +24,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  SOURCE_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+  SOURCE_SHA: ${{ inputs.image_tag || github.event.workflow_run.head_sha || github.sha }}
 
 jobs:
   deploy:
@@ -50,6 +50,10 @@ jobs:
           if [ -z "$image_tag" ]; then
             image_tag="${SOURCE_SHA}"
           fi
+          if ! [[ "${image_tag}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Staging image_tag must be an immutable 40-character commit SHA." >&2
+            exit 1
+          fi
 
           if [ -n "${STAGING_APP_DIR_OVERRIDE}" ]; then
             staging_app_dir="${STAGING_APP_DIR_OVERRIDE}"
@@ -64,6 +68,50 @@ jobs:
             echo "IMAGE_TAG=${image_tag}"
             echo "STAGING_APP_DIR=${staging_app_dir}"
           } >> "$GITHUB_ENV"
+
+      - name: Verify release images exist in GHCR
+        env:
+          GHCR_USERNAME: ${{ github.actor }}
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          export DOCKER_CONFIG="${RUNNER_TEMP}/docker-config-ghcr-preflight"
+          mkdir -p "${DOCKER_CONFIG}"
+          ghcr_auth="$(printf '%s:%s' "${GHCR_USERNAME}" "${GHCR_TOKEN}" | base64 | tr -d '\n')"
+          printf '{"auths":{"ghcr.io":{"auth":"%s"}}}\n' "${ghcr_auth}" > "${DOCKER_CONFIG}/config.json"
+
+          release_services=(
+            ingestion-service
+            workflow-orchestrator
+            preprocess-worker
+            ocr-service
+            layout-service
+            classifier-router-service
+            extraction-service
+            validation-service
+            human-review-console
+            delivery-service
+            evaluation-service
+            mlflow
+          )
+          missing=()
+          for service in "${release_services[@]}"; do
+            image="${IMAGE_NAMESPACE}/${service}:${IMAGE_TAG}"
+            if docker manifest inspect "${image}" >/dev/null 2>&1; then
+              echo "Found ${image}"
+            else
+              missing+=("${image}")
+            fi
+          done
+
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "The requested staging image tag is not fully published: ${IMAGE_TAG}" >&2
+            printf 'Missing release image: %s\n' "${missing[@]}" >&2
+            echo "" >&2
+            echo "Deploy Staging only accepts immutable SHA tags that were published by a successful Release Candidate run." >&2
+            echo "Run the Release Candidate workflow for ${IMAGE_TAG}, or rerun Deploy Staging with a SHA from a successful release-candidate manifest." >&2
+            exit 1
+          fi
 
       - name: Validate staging secrets
         env:
@@ -114,6 +162,7 @@ jobs:
           printf '%s\n' "$STAGING_ENV_FILE" > "${current_link}/.env.staging.tmp"
           chmod 600 "${current_link}/.env.staging.tmp"
           mv "${current_link}/.env.staging.tmp" "${current_link}/.env.staging"
+          printf '%s\n' "${IMAGE_TAG}" > "${current_link}/.idp-release-sha"
 
       - name: Deploy services on staging
         env:
@@ -193,6 +242,12 @@ jobs:
             delivery-service
             evaluation-service
           )
+          observability_services=(
+            prometheus
+            alertmanager
+            grafana
+            node-exporter
+          )
 
           "${compose[@]}" config --quiet
           echo "Docker storage before release image cleanup:"
@@ -267,9 +322,15 @@ jobs:
 
           "${compose[@]}" up -d --no-build temporal mlflow label-studio
           "${compose[@]}" up -d --no-build "${app_services[@]}"
+          "${compose[@]}" up -d --no-build "${observability_services[@]}"
           for service in "${health_checked_services[@]}"; do
             wait_for_healthy "${service}"
           done
+          for service in "${observability_services[@]}"; do
+            wait_for_healthy "${service}"
+          done
+          "${compose[@]}" exec -T prometheus promtool check config /etc/prometheus/prometheus.yml
+          "${compose[@]}" exec -T prometheus promtool check rules /etc/prometheus/alerts.yml
 
           provider_health_url="http://localhost:8016/health/provider"
           provider_ready=false
@@ -289,14 +350,23 @@ jobs:
             exit 1
           fi
 
-          "${compose[@]}" ps postgres redis seaweedfs temporal gateway mlflow label-studio "${app_services[@]}"
+          "${compose[@]}" ps postgres redis seaweedfs temporal gateway mlflow label-studio "${app_services[@]}" "${observability_services[@]}"
+
+      - name: Verify staging observability
+        run: |
+          set -euo pipefail
+          python3 scripts/staging_operational_drill.py observability \
+            --prometheus-url http://127.0.0.1:9090 \
+            --alertmanager-url http://127.0.0.1:9093 \
+            --grafana-url http://127.0.0.1:3000 \
+            --artifact-dir "artifacts/staging/observability/${SOURCE_SHA}"
 
       - name: Run post-deploy staging smoke
         env:
           STAGING_PUBLIC_BASE_URL: ${{ secrets.STAGING_PUBLIC_BASE_URL }}
           STAGING_SMOKE_API_KEY: ${{ secrets.STAGING_SMOKE_API_KEY }}
           STAGING_TENANT_ID: ${{ vars.STAGING_TENANT_ID || 'default' }}
-          STAGING_PROMETHEUS_URL: ${{ secrets.STAGING_PROMETHEUS_URL }}
+          STAGING_PROMETHEUS_URL: ${{ secrets.STAGING_PROMETHEUS_URL || 'http://127.0.0.1:9090' }}
         run: |
           set -euo pipefail
           if [ -z "$STAGING_PUBLIC_BASE_URL" ] || [ -z "$STAGING_SMOKE_API_KEY" ]; then
@@ -331,4 +401,12 @@ jobs:
         with:
           name: staging-smoke-${{ env.SOURCE_SHA }}
           path: artifacts/staging/smoke/${{ env.SOURCE_SHA }}
+          if-no-files-found: ignore
+
+      - name: Upload staging observability artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: staging-observability-${{ env.SOURCE_SHA }}
+          path: artifacts/staging/observability/${{ env.SOURCE_SHA }}
           if-no-files-found: ignore
