@@ -471,7 +471,7 @@ def observability(args: argparse.Namespace, repo_root: Path) -> dict[str, Any]:
             )
             disk_metrics = prometheus_query(
                 prometheus_url,
-                'node_filesystem_avail_bytes{mountpoint="/"}',
+                'node_filesystem_avail_bytes{fstype!~"tmpfs|ramfs|squashfs"}',
                 args.http_timeout,
             )
             if (

@@ -99,4 +99,4 @@ tests:
               instance: node-exporter:9100
             exp_annotations:
               summary: "Staging disk free space is below 15%"
-              description: "The root filesystem has less than 15% free space for 10 minutes. Prune unused images and artifacts or expand storage before the next deployment."
+              description: "A monitored filesystem has less than 15% free space for 10 minutes. Prune unused images and artifacts or expand storage before the next deployment."

@@ -72,6 +72,9 @@ class StagingObservabilityTests(unittest.TestCase):
             self.assertTrue(result["passed"])
             self.assertEqual(result["pipeline_target_count"], 10)
             self.assertTrue((Path(tmp) / "observability_manifest.json").exists())
+            disk_query = mocked_query.call_args_list[4].args[1]
+            self.assertIn("node_filesystem_avail_bytes", disk_query)
+            self.assertNotIn('mountpoint="/"', disk_query)
 
     @patch("scripts.staging_operational_drill.run_command")
     @patch("scripts.staging_operational_drill.request_status")

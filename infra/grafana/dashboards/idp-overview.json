@@ -427,7 +427,7 @@
     {
       "id": 15,
       "type": "timeseries",
-      "title": "Root Filesystem Free",
+      "title": "Filesystem Free",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -436,8 +436,8 @@
       },
       "targets": [
         {
-          "expr": "node_filesystem_avail_bytes{mountpoint=\"/\",fstype!~\"tmpfs|ramfs|squashfs\"} / node_filesystem_size_bytes{mountpoint=\"/\",fstype!~\"tmpfs|ramfs|squashfs\"}",
-          "legendFormat": "{{instance}}",
+          "expr": "node_filesystem_avail_bytes{fstype!~\"tmpfs|ramfs|squashfs\"} / node_filesystem_size_bytes{fstype!~\"tmpfs|ramfs|squashfs\"}",
+          "legendFormat": "{{instance}} {{mountpoint}}",
           "refId": "A"
         }
       ],
