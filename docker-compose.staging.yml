@@ -1,6 +1,11 @@
 name: idp-staging-stack
 
 services:
+  gateway:
+    volumes: !override
+      - ./infra/traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./infra/traefik/dynamic.yml:/etc/traefik/dynamic.yml:ro
+
   postgres:
     ports: !reset []
 

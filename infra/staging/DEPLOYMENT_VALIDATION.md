@@ -45,6 +45,12 @@ STAGING_PUBLIC_BASE_URL=http://127.0.0.1:8081
 STAGING_TENANT_ID=default
 ```
 
+The staging Compose overlay intentionally overrides the production Traefik
+dynamic config with `infra/traefik/dynamic.yml`. This keeps the local HTTP
+gateway usable for smoke tests. Production still uses
+`infra/traefik/dynamic.production.yml`, which permanently redirects HTTP to
+HTTPS.
+
 `STAGING_ENV_FILE` must contain the complete staging environment file. Updating
 a checkout's local `.env.staging` does not update the GitHub secret.
 
