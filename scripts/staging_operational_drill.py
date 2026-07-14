@@ -153,6 +153,8 @@ def smoke(args: argparse.Namespace, repo_root: Path) -> dict[str, Any]:
 
     started = time.time()
     completed = run_command(cmd, cwd=repo_root, env=env, capture=True, check=False)
+    stdout_tail = completed.stdout[-4000:]
+    stderr_tail = completed.stderr[-4000:]
     manifest = {
         "drill": "staging_smoke",
         "started_at_unix": started,
@@ -161,13 +163,20 @@ def smoke(args: argparse.Namespace, repo_root: Path) -> dict[str, Any]:
         "tenant_id": args.tenant_id,
         "artifact_dir": str(artifact_dir),
         "returncode": completed.returncode,
-        "stdout_tail": completed.stdout[-4000:],
-        "stderr_tail": completed.stderr[-4000:],
+        "stdout_tail": stdout_tail,
+        "stderr_tail": stderr_tail,
         "passed": completed.returncode == 0,
     }
     write_json(artifact_dir / "drill_manifest.json", manifest)
     if completed.returncode != 0:
-        raise DrillError(f"staging smoke drill failed; see {artifact_dir}")
+        message = [
+            f"staging smoke drill failed with exit code {completed.returncode}; see {artifact_dir}",
+        ]
+        if stderr_tail.strip():
+            message.append(f"stderr tail:\n{stderr_tail.rstrip()}")
+        if stdout_tail.strip():
+            message.append(f"stdout tail:\n{stdout_tail.rstrip()}")
+        raise DrillError("\n\n".join(message))
     return manifest
 
 

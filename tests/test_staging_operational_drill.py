@@ -10,15 +10,49 @@ from pathlib import Path
 from unittest.mock import patch
 
 from scripts.staging_operational_drill import (
+    DrillError,
     REQUIRED_ALERTS,
     hardening,
     observability,
     prometheus_query,
     restore_verify,
+    smoke,
 )
 
 
 class StagingObservabilityTests(unittest.TestCase):
+    @patch("scripts.staging_operational_drill.run_command")
+    def test_smoke_failure_surfaces_e2e_output(self, mocked_command) -> None:
+        completed = subprocess.CompletedProcess(
+            args=["python", "scripts/full_pipeline_e2e.py"],
+            returncode=1,
+            stdout="workflow status: FAILED\n",
+            stderr="E2E failed: workflow ended unsuccessfully: FAILED\n",
+        )
+        mocked_command.return_value = completed
+
+        with tempfile.TemporaryDirectory() as tmp:
+            args = argparse.Namespace(
+                api_url="http://127.0.0.1:8081",
+                api_key="secret",
+                tenant_id="default",
+                actor_id="staging-smoke",
+                require_observability=True,
+                prometheus_url="http://127.0.0.1:9090",
+                sample_path=None,
+                timeout_seconds=1,
+                poll_interval=0.01,
+                artifact_dir=tmp,
+            )
+
+            with self.assertRaises(DrillError) as raised:
+                smoke(args, Path("."))
+
+            message = str(raised.exception)
+            self.assertIn("E2E failed: workflow ended unsuccessfully: FAILED", message)
+            self.assertIn("workflow status: FAILED", message)
+            self.assertTrue((Path(tmp) / "drill_manifest.json").exists())
+
     @patch("scripts.staging_operational_drill.http_get_json")
     def test_prometheus_query_returns_vector(self, mocked_get) -> None:
         mocked_get.return_value = {"status": "success", "data": {"result": [{"metric": {}, "value": [1, "1"]}]}}
