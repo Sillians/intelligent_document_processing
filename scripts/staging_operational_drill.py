@@ -16,6 +16,10 @@ from pathlib import Path
 from typing import Any
 from urllib import error, parse, request
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 from scripts.full_pipeline_e2e import RunnerConfig, submit_document
 from scripts.production_preflight import parse_env
 
