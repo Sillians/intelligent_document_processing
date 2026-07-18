@@ -22,10 +22,24 @@ jobs:
     runs-on: [self-hosted, staging]
     timeout-minutes: 90
     environment: staging
+    env:
+      EVIDENCE_DIR: ${{ github.workspace }}/artifacts/staging/hardening/${{ github.run_id }}
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      - name: Initialize hardening evidence
+        run: |
+          set -euo pipefail
+          mkdir -p "${EVIDENCE_DIR}"
+          {
+            echo "workflow=Harden Staging"
+            echo "run_id=${GITHUB_RUN_ID}"
+            echo "run_attempt=${GITHUB_RUN_ATTEMPT}"
+            echo "workspace=${GITHUB_WORKSPACE}"
+            echo "runner_os=${RUNNER_OS:-unknown}"
+          } > "${EVIDENCE_DIR}/workflow_context.txt"
 
       - name: Resolve deployed staging release
         env:
@@ -40,13 +54,24 @@ jobs:
             staging_app_dir="/opt/idp-staging"
           fi
           marker="${staging_app_dir}/current/.idp-release-sha"
-          test -s "${marker}"
+          {
+            echo "staging_app_dir=${staging_app_dir}"
+            echo "release_marker=${marker}"
+          } > "${EVIDENCE_DIR}/release_resolution.txt"
+          if [ ! -s "${marker}" ]; then
+            echo "Missing deployed staging release marker: ${marker}" | tee -a "${EVIDENCE_DIR}/release_resolution.txt" >&2
+            echo "Run Deploy Staging successfully before running Harden Staging." >&2
+            exit 1
+          fi
           release_sha="$(tr -d '[:space:]' < "${marker}")"
-          [[ "${release_sha}" =~ ^[0-9a-f]{40}$ ]]
+          if ! [[ "${release_sha}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Invalid deployed staging release SHA in ${marker}: ${release_sha}" | tee -a "${EVIDENCE_DIR}/release_resolution.txt" >&2
+            exit 1
+          fi
+          echo "release_sha=${release_sha}" >> "${EVIDENCE_DIR}/release_resolution.txt"
           {
             echo "STAGING_APP_DIR=${staging_app_dir}"
             echo "RELEASE_SHA=${release_sha}"
-            echo "EVIDENCE_DIR=${GITHUB_WORKSPACE}/artifacts/staging/hardening/${GITHUB_RUN_ID}"
           } >> "${GITHUB_ENV}"
 
       - name: Validate hardening credentials
@@ -58,11 +83,31 @@ jobs:
           STAGING_ISOLATION_TENANT_ID: ${{ vars.STAGING_ISOLATION_TENANT_ID || 'isolation-test' }}
         run: |
           set -euo pipefail
-          test -n "${STAGING_PUBLIC_BASE_URL}"
-          test -n "${STAGING_SMOKE_API_KEY}"
-          test -n "${STAGING_ISOLATION_API_KEY}"
-          test "${STAGING_SMOKE_API_KEY}" != "${STAGING_ISOLATION_API_KEY}"
-          test "${STAGING_TENANT_ID}" != "${STAGING_ISOLATION_TENANT_ID}"
+          missing=()
+          [ -n "${STAGING_PUBLIC_BASE_URL}" ] || missing+=("STAGING_PUBLIC_BASE_URL")
+          [ -n "${STAGING_SMOKE_API_KEY}" ] || missing+=("STAGING_SMOKE_API_KEY")
+          [ -n "${STAGING_ISOLATION_API_KEY}" ] || missing+=("STAGING_ISOLATION_API_KEY")
+
+          {
+            echo "has_staging_public_base_url=$([ -n "${STAGING_PUBLIC_BASE_URL}" ] && echo true || echo false)"
+            echo "has_staging_smoke_api_key=$([ -n "${STAGING_SMOKE_API_KEY}" ] && echo true || echo false)"
+            echo "has_staging_isolation_api_key=$([ -n "${STAGING_ISOLATION_API_KEY}" ] && echo true || echo false)"
+            echo "primary_tenant=${STAGING_TENANT_ID}"
+            echo "secondary_tenant=${STAGING_ISOLATION_TENANT_ID}"
+          } > "${EVIDENCE_DIR}/credential_validation.txt"
+
+          if [ "${#missing[@]}" -gt 0 ]; then
+            printf 'Missing required hardening secret(s): %s\n' "${missing[*]}" | tee -a "${EVIDENCE_DIR}/credential_validation.txt" >&2
+            exit 1
+          fi
+          if [ "${STAGING_SMOKE_API_KEY}" = "${STAGING_ISOLATION_API_KEY}" ]; then
+            echo "STAGING_SMOKE_API_KEY and STAGING_ISOLATION_API_KEY must be different." | tee -a "${EVIDENCE_DIR}/credential_validation.txt" >&2
+            exit 1
+          fi
+          if [ "${STAGING_TENANT_ID}" = "${STAGING_ISOLATION_TENANT_ID}" ]; then
+            echo "STAGING_TENANT_ID and STAGING_ISOLATION_TENANT_ID must be different." | tee -a "${EVIDENCE_DIR}/credential_validation.txt" >&2
+            exit 1
+          fi
 
       - name: Validate staging hardening policy
         run: |
@@ -70,7 +115,8 @@ jobs:
           cd "${STAGING_APP_DIR}/current"
           python3 scripts/production_preflight.py \
             --env-file .env.staging \
-            --environment staging
+            --environment staging \
+            2>&1 | tee "${EVIDENCE_DIR}/preflight.log"
 
       - name: Verify tenant isolation, transport, and audit logs
         env:
@@ -96,7 +142,9 @@ jobs:
           if [ "${ALLOW_LOOPBACK_HTTP}" = "true" ]; then
             args+=(--allow-loopback-http)
           fi
-          python3 scripts/staging_operational_drill.py "${args[@]}"
+          mkdir -p "${EVIDENCE_DIR}/security"
+          python3 scripts/staging_operational_drill.py "${args[@]}" \
+            2>&1 | tee "${EVIDENCE_DIR}/security/hardening.log"
 
       - name: Create and verify encrypted backup
         run: |
@@ -105,10 +153,12 @@ jobs:
           backup_dir="${EVIDENCE_DIR}/backup"
           python3 scripts/staging_operational_drill.py backup \
             --env-file .env.staging \
-            --artifact-dir "${backup_dir}"
+            --artifact-dir "${backup_dir}" \
+            2>&1 | tee "${EVIDENCE_DIR}/backup.log"
           python3 scripts/staging_operational_drill.py restore-verify \
             --env-file .env.staging \
-            --backup-dir "${backup_dir}"
+            --backup-dir "${backup_dir}" \
+            2>&1 | tee -a "${EVIDENCE_DIR}/backup.log"
 
       - name: Apply retention policy after verified backup
         run: |

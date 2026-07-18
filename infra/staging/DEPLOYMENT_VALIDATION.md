@@ -604,6 +604,22 @@ tenant. Run the manual `Harden Staging` GitHub Actions workflow. It verifies:
 - encrypted backup creation and decrypting archive verification succeed,
 - raw, derived, and audit retention is applied after the verified backup.
 
+For local self-hosted staging with
+`STAGING_PUBLIC_BASE_URL=http://127.0.0.1:8081`, dispatch the workflow with
+`allow_loopback_http=true`. Leave the waiver off only when staging is reachable
+through HTTPS.
+
+The workflow writes redacted diagnostics to
+`artifacts/staging/hardening/<run-id>` before credential validation. If the run
+fails early, inspect `credential_validation.txt` and `release_resolution.txt`.
+Common early failures are:
+
+- `STAGING_ISOLATION_API_KEY` is missing.
+- `STAGING_ISOLATION_API_KEY` is identical to `STAGING_SMOKE_API_KEY`.
+- `STAGING_ISOLATION_TENANT_ID` is identical to `STAGING_TENANT_ID`.
+- The deployed release marker `$STAGING_APP_DIR/current/.idp-release-sha` is
+  missing because `Deploy Staging` has not completed successfully.
+
 Generate independent credentials with:
 
 ```bash
