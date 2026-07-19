@@ -36,7 +36,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ env.SOURCE_SHA }}
 
@@ -258,10 +258,18 @@ jobs:
 
             for service in "${release_services[@]}"; do
               image="${IMAGE_NAMESPACE}/${service}:${IMAGE_TAG}"
+              pull_args=()
+              if [ "${service}" != "ocr-service" ]; then
+                pull_args+=(--platform linux/amd64)
+              fi
               pulled=false
               for attempt in $(seq 1 "${attempts}"); do
-                echo "Pulling ${image} (${attempt}/${attempts})"
-                if docker image pull "${image}"; then
+                if [ "${#pull_args[@]}" -gt 0 ]; then
+                  echo "Pulling ${image} for linux/amd64 (${attempt}/${attempts})"
+                else
+                  echo "Pulling ${image} for runner-native platform (${attempt}/${attempts})"
+                fi
+                if docker image pull "${pull_args[@]}" "${image}"; then
                   pulled=true
                   break
                 fi
@@ -427,7 +435,7 @@ jobs:
 
       - name: Upload staging smoke artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: staging-smoke-${{ env.SOURCE_SHA }}
           path: artifacts/staging/smoke/${{ env.SOURCE_SHA }}
@@ -435,7 +443,7 @@ jobs:
 
       - name: Upload staging observability artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: staging-observability-${{ env.SOURCE_SHA }}
           path: artifacts/staging/observability/${{ env.SOURCE_SHA }}
