@@ -169,6 +169,11 @@ gateway, MLflow, Label Studio, and all IDP application services. It also creates
 the `idp`, `temporal`, `temporal_visibility`, `mlflow`, and `labelstudio`
 databases when missing.
 
+The workflow pulls each immutable release image directly with retry/backoff. If
+GHCR requests time out on the self-hosted runner, raise
+`STAGING_IMAGE_PULL_ATTEMPTS` from the default `3` attempts before rerunning
+`Deploy Staging`.
+
 Pass when:
 
 - Compose configuration validation exits with code `0`,

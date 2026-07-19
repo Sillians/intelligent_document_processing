@@ -169,6 +169,7 @@ jobs:
           GHCR_USERNAME: ${{ github.actor }}
           GHCR_TOKEN: ${{ github.token }}
           STAGING_DOCKER_PRUNE_BEFORE_PULL: ${{ vars.STAGING_DOCKER_PRUNE_BEFORE_PULL || 'true' }}
+          STAGING_IMAGE_PULL_ATTEMPTS: ${{ vars.STAGING_IMAGE_PULL_ATTEMPTS || '3' }}
         run: |
           set -euo pipefail
           cd "${STAGING_APP_DIR}/current"
@@ -248,6 +249,35 @@ jobs:
             grafana
             node-exporter
           )
+          pull_release_images() {
+            attempts="${STAGING_IMAGE_PULL_ATTEMPTS:-3}"
+            if ! [[ "${attempts}" =~ ^[1-9][0-9]*$ ]]; then
+              echo "STAGING_IMAGE_PULL_ATTEMPTS must be a positive integer, got '${attempts}'." >&2
+              exit 1
+            fi
+
+            for service in "${release_services[@]}"; do
+              image="${IMAGE_NAMESPACE}/${service}:${IMAGE_TAG}"
+              pulled=false
+              for attempt in $(seq 1 "${attempts}"); do
+                echo "Pulling ${image} (${attempt}/${attempts})"
+                if docker image pull "${image}"; then
+                  pulled=true
+                  break
+                fi
+                if [ "${attempt}" -lt "${attempts}" ]; then
+                  sleep_seconds=$((attempt * 20))
+                  echo "Pull failed for ${image}; retrying in ${sleep_seconds}s."
+                  sleep "${sleep_seconds}"
+                fi
+              done
+              if [ "${pulled}" != "true" ]; then
+                echo "Failed to pull ${image} after ${attempts} attempt(s)." >&2
+                docker system df >&2 || true
+                exit 1
+              fi
+            done
+          }
 
           "${compose[@]}" config --quiet
           echo "Docker storage before release image cleanup:"
@@ -263,7 +293,7 @@ jobs:
           fi
           echo "Docker storage after release image cleanup:"
           docker system df || true
-          "${compose[@]}" pull "${release_services[@]}"
+          pull_release_images
           "${compose[@]}" up -d --no-build postgres redis seaweedfs gateway
 
           postgres_user="$(awk -F= '$1 == "POSTGRES_USER" {gsub(/[[:space:]"]/, "", $2); print $2}' .env.staging | tail -n 1)"

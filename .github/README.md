@@ -106,6 +106,11 @@ For manual deploys, `image_tag` is also used as the checked-out source ref. This
 keeps the compose files, deploy scripts, and container images aligned to the same
 immutable revision.
 
+Release images are pulled one service at a time with retry/backoff to tolerate
+transient GHCR timeouts on the self-hosted staging runner. Set the staging
+repository/environment variable `STAGING_IMAGE_PULL_ATTEMPTS` to increase the
+default of `3` attempts if registry pulls are consistently slow.
+
 ### Benchmark Staging
 
 File: `.github/workflows/benchmark-staging.yml`
