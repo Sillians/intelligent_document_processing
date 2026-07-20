@@ -47,7 +47,7 @@ jobs:
           [[ "${BENCHMARK_RUN_ID}" =~ ^[1-9][0-9]*$ ]]
 
       - name: Check out exact release source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ inputs.release_sha }}
 
@@ -83,7 +83,7 @@ jobs:
 
     steps:
       - name: Check out exact release source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ inputs.release_sha }}
 
