@@ -170,6 +170,7 @@ jobs:
           GHCR_TOKEN: ${{ github.token }}
           STAGING_DOCKER_PRUNE_BEFORE_PULL: ${{ vars.STAGING_DOCKER_PRUNE_BEFORE_PULL || 'true' }}
           STAGING_IMAGE_PULL_ATTEMPTS: ${{ vars.STAGING_IMAGE_PULL_ATTEMPTS || '3' }}
+          STAGING_DOCKER_HOST: ${{ vars.STAGING_DOCKER_HOST }}
         run: |
           set -euo pipefail
           cd "${STAGING_APP_DIR}/current"
@@ -180,6 +181,34 @@ jobs:
           export IDP_ENV_FILE=.env.staging
           export IDP_IMAGE_REGISTRY="${IMAGE_NAMESPACE}"
           export IDP_IMAGE_TAG="${IMAGE_TAG}"
+
+          configure_docker_client() {
+            if [ -n "${STAGING_DOCKER_HOST:-}" ]; then
+              export DOCKER_HOST="${STAGING_DOCKER_HOST}"
+              echo "Using Docker host from STAGING_DOCKER_HOST."
+            elif [ "${RUNNER_OS:-}" = "macOS" ]; then
+              desktop_socket="${HOME}/.docker/run/docker.sock"
+              if [ -S "${desktop_socket}" ]; then
+                export DOCKER_HOST="unix://${desktop_socket}"
+                echo "Using Docker Desktop socket: ${DOCKER_HOST}"
+              else
+                echo "Docker Desktop socket was not found at ${desktop_socket}." >&2
+                echo "Start or unpause Docker Desktop for the same macOS user that runs the self-hosted runner." >&2
+                echo "Alternatively set the staging variable STAGING_DOCKER_HOST to the runner's Docker socket URL." >&2
+                exit 1
+              fi
+            fi
+
+            if ! docker version; then
+              echo "Unable to connect to Docker before staging deployment." >&2
+              echo "On macOS, ensure Docker Desktop is running, not paused, and started under the same user as the GitHub runner." >&2
+              echo "Current DOCKER_HOST=${DOCKER_HOST:-<default docker context>}." >&2
+              exit 1
+            fi
+            docker compose version
+          }
+
+          configure_docker_client
 
           gateway_http_bind="$(awk -F= '$1 == "GATEWAY_HTTP_BIND" {gsub(/[[:space:]"]/, "", $2); print $2}' .env.staging | tail -n 1)"
           gateway_http_host_port="$(awk -F= '$1 == "GATEWAY_HTTP_HOST_PORT" {gsub(/[[:space:]"]/, "", $2); print $2}' .env.staging | tail -n 1)"
