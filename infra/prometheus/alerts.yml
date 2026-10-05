@@ -105,6 +105,28 @@ groups:
           summary: "Temporal task queue metrics are missing"
           description: "Prometheus has no Temporal backlog series. Check the workflow orchestrator metrics server and Prometheus target."
 
+  - name: idp-delivery-recovery
+    rules:
+      - alert: IDPDeliveryDeadLetters
+        expr: idp_delivery_dead_letter_destinations > 0
+        for: 2m
+        labels:
+          severity: critical
+          category: delivery
+        annotations:
+          summary: "Delivery destinations require operator redrive"
+          description: "At least one destination exhausted its attempt budget. Inspect the tenant-scoped delivery queue, fix the destination, and redrive only failed work."
+
+      - alert: IDPDeliveryAgeHigh
+        expr: idp_delivery_oldest_unfinished_age_seconds > 900
+        for: 5m
+        labels:
+          severity: warning
+          category: delivery
+        annotations:
+          summary: "Unfinished delivery is older than 15 minutes"
+          description: "Delivery reconciliation has unfinished work older than 15 minutes. Check storage, destination health, expired leases, and dead letters before the workflow deadline."
+
   - name: idp-infrastructure
     rules:
       - alert: IDPNodeExporterDown

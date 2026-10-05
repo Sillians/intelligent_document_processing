@@ -1,331 +1,171 @@
 # Delivery Service
 
 ## Core Purpose
-Publish approved structured document results to downstream destinations reliably, idempotently, and with a durable delivery audit trail.
+Publish approved results and signed workflow events using an authoritative
+PostgreSQL delivery ledger. A background reconciler, not the caller, owns retry
+and recovery. This revision supersedes the earlier S3-only receipt/in-process
+retry design. Human-approved results already resume through validation and delivery.
 
-The service closes the primary automated IDP pipeline:
-
-```text
-Ingestion
--> Preprocessing
--> OCR
--> Layout
--> Classification
--> Extraction
--> Validation
--> Delivery when auto-approved
-```
-
-Documents requiring review stop at `human-review-console`. The delivery service already accepts `human_approved` as an approval status for a future review-resolution callback or resume workflow.
-
-## Implemented Core Functionalities
-- Accepts approved delivery requests at `POST /deliver`.
-- Rejects unapproved requests by default.
-- Creates deterministic delivery IDs for Temporal retry idempotency.
-- Detects completed deliveries and returns the existing receipt without publishing twice.
-- Packages results in a versioned delivery envelope.
-- Supports configurable field redaction before outbound delivery.
-- Uses a modular destination-provider interface.
-- Delivers to S3-compatible object storage by default.
-- Supports optional signed webhook delivery.
-- Retries transient provider failures with exponential backoff.
-- Persists successful and failed delivery receipts.
-- Exposes a delivery receipt lookup API.
-- Runs destination providers concurrently when multiple destinations are selected.
-- Bounds concurrent delivery requests and returns retryable overload responses.
-
-## Provider Model
-A destination provider implements the following interface:
-
-```python
-class DeliveryProvider(Protocol):
-    name: str
-
-    async def deliver(self, context: DeliveryContext) -> dict:
-        ...
-```
-
-Current providers:
-- `ObjectStorageProvider`: writes the versioned final payload to `DELIVERY_BUCKET`.
-- `WebhookProvider`: sends the versioned final payload to an HTTP endpoint with idempotency and optional HMAC signature headers.
-
-New providers can be registered in `delivery_service/app/providers.py` for message queues, databases, REST APIs, enterprise systems, or custom sinks without changing the core delivery orchestration logic.
-
-## Primary Inputs
-- `job_id`
-- `payload`
-- `approval_status`: normally `auto_approved` or `human_approved`
-- `destinations` optional list of provider names
-- `webhook_url` optional per-request webhook override
-- `idempotency_key` optional explicit idempotency key
-- `extraction_bucket` optional
-- `extraction_key` optional
-- `validation_bucket` optional
-- `validation_key` optional
-- `metadata` optional
-
-
-Example request:
-
-```json
-{
-  "job_id": "job-123",
-  "payload": {
-    "invoice_number": "INV-001",
-    "invoice_date": "2026-06-01",
-    "total_amount": "$500.00"
-  },
-  "approval_status": "auto_approved",
-  "destinations": ["object_storage"],
-  "extraction_bucket": "extraction-artifacts",
-  "extraction_key": "jobs/job-123/extraction/result.json",
-  "validation_bucket": "validation-artifacts",
-  "validation_key": "jobs/job-123/validation/result.json",
-  "metadata": {
-    "route": "invoice"
-  }
-}
-```
-
-## Primary Outputs
-- `job_id`
-- `delivery_id`
-- `delivery_status`
-- `delivery_artifact`
-- `delivery_bucket`
-- `delivery_receipt_key`
-- `destination_results`
-- `webhook_status`
-- `delivered_at`
-- `idempotent_replay`
-
-Example response:
-
-```json
-{
-  "job_id": "job-123",
-  "delivery_id": "delivery-abc123",
-  "delivery_status": "success",
-  "delivery_artifact": "s3://delivery-artifacts/jobs/job-123/delivery/delivery-abc123/payload.json",
-  "delivery_bucket": "delivery-artifacts",
-  "delivery_receipt_key": "jobs/job-123/delivery/delivery-abc123/receipt.json",
-  "destination_results": [
-    {
-      "provider": "object_storage",
-      "status": "success",
-      "attempts": 1
-    }
-  ],
-  "webhook_status": "skipped",
-  "idempotent_replay": false
-}
-```
-
-## Interfaces
-- `GET /health`
-- `POST /deliver`
-- `GET /deliveries/{job_id}/{delivery_id}`
-- API documentation: `http://localhost:8017/docs`
-
-## Approval Gate
-Delivery requires explicit approval by default:
-
-```env
-DELIVERY_REQUIRE_APPROVAL=true
-DELIVERY_ALLOWED_APPROVAL_STATUSES=auto_approved,human_approved
-```
-
-Requests without an allowed `approval_status` return HTTP `409`. The workflow orchestrator passes the validation verdict and validation artifact references into the delivery request.
-
-Do not disable the approval gate in production unless an equivalent upstream enforcement mechanism exists.
-
-## Idempotency
-When `idempotency_key` is provided, it controls the deterministic delivery ID. Otherwise, the service derives the delivery ID from:
-- Job ID
-- Approved payload
-- Approval status
-- Selected destinations
-- Webhook URL
-
-A successful existing receipt causes the service to return the prior result with:
-
-```json
-{
-  "idempotent_replay": true
-}
-```
-
-This prevents duplicate downstream delivery when Temporal retries an activity.
-
-## Object Storage Provider
-Default configuration:
-
-```env
-DELIVERY_PROVIDERS=object_storage
-DELIVERY_BUCKET=delivery-artifacts
-```
-
-Payload artifact pattern:
-
-```text
-jobs/<job_id>/delivery/<delivery_id>/payload.json
-```
-
-Receipt artifact pattern:
-
-```text
-jobs/<job_id>/delivery/<delivery_id>/receipt.json
-```
-
-If receipt persistence to `DELIVERY_BUCKET` fails, the service falls back to `VALIDATION_BUCKET`.
-
-## Webhook Provider
-Enable final payload delivery to a webhook destination globally:
-
-```env
-DELIVERY_PROVIDERS=object_storage,webhook
-DELIVERY_WEBHOOK_URL=https://consumer.example.com/idp/results
-DELIVERY_WEBHOOK_SECRET=<strong-shared-secret>
-```
-
-A caller can also select destinations and provide a webhook URL per request:
-
-```json
-{
-  "destinations": ["object_storage", "webhook"],
-  "webhook_url": "https://consumer.example.com/idp/results"
-}
-```
-
-Per-request webhook URLs are disabled by default to prevent server-side request forgery:
-
-```env
-DELIVERY_ALLOW_REQUEST_WEBHOOK_URL=false
-```
-
-If per-request destinations are required, explicitly enable them and restrict destination hosts:
-
-```env
-DELIVERY_ALLOW_REQUEST_WEBHOOK_URL=true
-DELIVERY_WEBHOOK_ALLOWED_HOSTS=consumer.example.com,backup-consumer.example.com
-```
-
-Webhook headers:
-- `Idempotency-Key`: deterministic delivery ID
-- `X-IDP-Delivery-Id`: deterministic delivery ID
-- `X-IDP-Job-Id`: source job ID
-- `X-IDP-Signature-256`: `sha256=<hex digest>` when `DELIVERY_WEBHOOK_SECRET` is configured
-
-Consumers should verify the HMAC SHA-256 signature over the exact raw request body before accepting the payload.
-
-Webhook signatures are required by default:
-
-```env
-DELIVERY_WEBHOOK_REQUIRE_SIGNATURE=true
-```
-
-## Workflow Event Webhooks
-The workflow orchestrator also posts terminal client events to this service at
-`POST /webhooks/events`. The delivery service signs, retries, and persists the
-outbound event receipt.
-
-Emitted event types:
-
-- `document.completed`
-- `document.pending_human_review`
-- `document.failed`
-
-Event receipt artifact pattern:
-
-```text
-jobs/<job_id>/webhooks/<event_id>/receipt.json
-```
-
-If `DELIVERY_WEBHOOK_URL` is empty, event delivery is skipped but an audit
-receipt is still written. Consumers should deduplicate events by `event_id` and
-verify `X-IDP-Signature-256` when signatures are enabled.
-
-## Redaction
-Configure top-level or nested field names that must be redacted from outbound payloads:
-
-```env
-DELIVERY_REDACT_FIELDS=account_number,ssn,national_id
-```
-
-Every matching dictionary key is replaced with `[REDACTED]`. The delivery envelope and receipt include the list of redacted field names.
-
-## Key Configuration
-- `DELIVERY_BUCKET`
-- `DELIVERY_PROVIDERS`
-- `DELIVERY_REQUIRE_APPROVAL`
-- `DELIVERY_ALLOWED_APPROVAL_STATUSES`
-- `DELIVERY_REQUEST_TIMEOUT_SECONDS`
-- `DELIVERY_MAX_INFLIGHT_REQUESTS`
-- `DELIVERY_RETRY_MAX`
-- `DELIVERY_RETRY_BACKOFF_SECONDS`
-- `DELIVERY_PAYLOAD_FORMAT_VERSION`
-- `DELIVERY_REDACT_FIELDS`
-- `DELIVERY_WEBHOOK_URL`
-- `DELIVERY_WEBHOOK_SECRET`
-- `DELIVERY_WEBHOOK_REQUIRE_SIGNATURE`
-- `DELIVERY_ALLOW_REQUEST_WEBHOOK_URL`
-- `DELIVERY_WEBHOOK_ALLOWED_HOSTS`
-- `DELIVERY_WEBHOOK_TIMEOUT_SECONDS`
-
-## Failure Handling
-- Unknown providers return HTTP `422`.
-- Missing or invalid approval status returns HTTP `409`.
-- Busy delivery capacity returns HTTP `503` so Temporal can retry.
-- Request timeout returns HTTP `504`.
-- Provider failure returns HTTP `502` after configured retries.
-- Successful and failed delivery attempts are persisted as receipts.
-- Temporal activity retry provides an additional retry layer outside the service.
-
-## Security and Compliance
-- Approval status is required before delivery.
-- Webhooks can be signed with `HMAC SHA-256`.
-- Arbitrary per-request webhook URLs are disabled by default and can be restricted to an explicit host allowlist.
-- Configured sensitive fields are redacted before outbound publishing.
-- Delivery payloads and receipts preserve source extraction and validation artifact references.
-- Secrets should be injected by a secret manager and must not be committed.
-
-## Observability
-- `FastAPI` app is instrumented with the shared Prometheus middleware.
-- Delivery receipts include provider attempts, duration, destinations, status, and failure details.
-- Useful operational metrics include success rate, failure rate, retry count, destination latency, and idempotent replay rate.
-
-## How To Run
-
-Run with Docker Compose:
+## Run
+From the repository root, configure the database, S3 and internal credentials:
 
 ```bash
-docker compose up -d delivery-service
-```
-
-Run locally from repository root:
-
-```bash
+docker compose up -d postgres seaweedfs delivery-service
+# Or run Python against reachable configured dependencies:
 uv sync --frozen --no-default-groups --group base
-PYTHONPATH=. .venv/bin/uvicorn delivery_service.app.main:app --host 0.0.0.0 --port 8017 --reload
+PYTHONPATH=. .venv/bin/uvicorn delivery_service.app.main:app --host 127.0.0.1 --port 8017
+.venv/bin/python -m unittest delivery_service.tests.test_main -v
 ```
 
-Run tests:
+`/health` is liveness; `/ready` requires the ledger. Compose now checks `/ready`
+and waits for PostgreSQL. Ledger creation failure prevents startup; there is no
+volatile success fallback. Local startup creates additive tables with `IF NOT
+EXISTS`. Production must roll out these schemas under a controlled migration,
+back up the database, and restore-test before promotion.
+
+## Persistence And Recovery
+- `delivery_operations`: immutable request fingerprint, redacted request, frozen envelope, configured destination and tenant/job identity.
+- `delivery_work`: one row per destination plus a separate `__receipt__` projection; due time, bounded attempt budget, lease token and expiry.
+- `delivery_attempts`: immutable attempt starts/outcomes, including `unknown` when an abandoned lease expires.
+- `delivery_operator_audit`: authenticated actor and reason for redrive, retained independently of operation cleanup.
+
+Registration and work creation commit before any external effect. Claims use
+`FOR UPDATE SKIP LOCKED`; acknowledgements/failures require the current unexpired
+lease token. A restart recovers due work without another client request. Attempt
+budgets include crashes, not just explicit provider errors. HTTP errors other
+than 408, 425 and 429 in the 4xx range are permanent; transient failures use
+bounded backoff. Exhaustion enters `dead_letter`.
+
+Object storage and webhook providers implement the modular
+`DeliveryProvider.deliver(DeliveryContext)` interface in `app/providers.py`.
+Acknowledged destinations never resend because another destination or receipt
+projection failed. The S3 receipt is projected only after all destinations are
+acknowledged and is itself retryable durable work. A failed receipt PUT cannot
+be mistaken for successful delivery. Deterministic tenant/job keys make repeated
+object PUTs replace the same object after an acknowledgement-loss crash.
+
+Remote webhooks are **at-least-once**, not exactly-once. The receiver must atomically
+persist the stable `Idempotency-Key` with its own side effect. The stored canonical
+envelope and URL stay fixed across retries; HMAC uses the current configured
+signing secret. Coordinate signing-key rotation with receivers. HTTPS, egress
+policy and destination authorization are deployment requirements; an allowlisted
+hostname alone is not a complete SSRF/network isolation policy.
+
+## APIs
+Private calls require `X-IDP-Internal-Key` when internal authorization is enabled.
+Tenant/job identities and artifact paths are checked at service boundaries.
+
+| Endpoint | Behavior |
+| --- | --- |
+| `POST /deliver` | Approved structured payload; 200 only after every destination and receipt is acknowledged, otherwise 202 with pending/dead-letter work. |
+| `GET /deliveries/{job_id}/{delivery_id}?tenant_id=...` | Tenant/job-scoped authoritative operation status/receipt; 404 outside scope. |
+| `POST /webhooks/events` | Durable signed event; unset URL yields a durably recorded skipped event. |
+| `GET /delivery-queue` | Tenant-scoped unfinished work; bounded `limit`/`offset`; requires operator and internal keys. |
+| `POST /delivery-queue/{operation_id}/redrive` | Retry only dead-letter destinations; reason required; authenticated audit; 202. |
+| `GET /health`, `GET /ready`, `GET /metrics` | Liveness, dependency readiness and telemetry. |
+
+The request body includes `tenant_id`, `job_id`, `payload`, `approval_status`,
+optional `destinations`, `idempotency_key`, `webhook_url`, source artifact keys,
+and `metadata`. Default allowed approvals are `auto_approved,human_approved`.
+An internal approval string is not independent proof of authorization; keep
+this API private and route document approval through validation/review.
+
+An explicit idempotency key fixes the operation ID. Without one, the semantic
+request determines it. The committed fingerprint includes the request, providers
+and resolved URL. Another job, payload, approval, source, metadata or destination
+under that ID returns 409. Replays cannot replace the frozen envelope. Changing
+default provider/URL configuration can therefore conflict with an old caller
+replay; already committed background work still uses its original destination.
+Non-finite JSON values are rejected.
+
+Existing S3-only receipts without ledger rows fail closed with 409 rather than
+resend uncertain historical deliveries, including the previous generated ID
+format. Storage lookup outages return 503, not 'receipt absent'. Before rollout,
+export and verify legacy receipts, migrate their acknowledged destinations into
+the ledger through a reviewed migration, or drain old workflows first. An
+automatic historical receipt importer is not included. Never solve a 409 by
+changing the key and sending the same historical result again.
+
+Example operator recovery from an authorized private network:
 
 ```bash
-.venv/bin/python -m unittest discover -s delivery_service/tests -p 'test_*.py' -v
+curl -fsS "$DELIVERY_URL/delivery-queue" \
+  -H "X-IDP-Internal-Key: $IDP_INTERNAL_API_KEY" \
+  -H "X-IDP-Operator-Key: $OPERATOR_KEY"
+curl -fsS -X POST "$DELIVERY_URL/delivery-queue/$OPERATION_ID/redrive" \
+  -H "X-IDP-Internal-Key: $IDP_INTERNAL_API_KEY" \
+  -H "X-IDP-Operator-Key: $OPERATOR_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"reason":"Destination repaired and verified"}'
 ```
 
-Run focused workflow contract tests:
+A non-dead-letter operation returns 409; another tenant receives 404. Redrive
+resets the failed destination's budget but preserves lifetime attempts and all
+successful work. It does not mutate payload, approval or URL.
+
+## Configuration
+| Variable | Default / purpose |
+| --- | --- |
+| `POSTGRES_*` | Mandatory shared ledger connection. |
+| `DELIVERY_PROVIDERS` | `object_storage`; optional `webhook`. |
+| `DELIVERY_BUCKET` | `delivery-artifacts`; receipt storage may fall back to validation bucket. |
+| `DELIVERY_REQUIRE_APPROVAL` | `true`. |
+| `DELIVERY_ALLOWED_APPROVAL_STATUSES` | `auto_approved,human_approved`. |
+| `DELIVERY_DURABLE_MAX_ATTEMPTS` | `10` claims per destination per redrive cycle, including abandoned claims. |
+| `DELIVERY_RECONCILE_INTERVAL_SECONDS` | `5`. |
+| `DELIVERY_LEASE_SECONDS` | `120`; size above maximum outbound timeout and expected execution time. |
+| `DELIVERY_RETRY_BACKOFF_SECONDS` | `0.5`; exponential backoff capped at 300 seconds. |
+| `DELIVERY_REQUEST_TIMEOUT_SECONDS` | `60`; processing timeout. |
+| `DELIVERY_MAX_INFLIGHT_REQUESTS` | `16`; request capacity. |
+| `DELIVERY_WAIT_TIMEOUT_SECONDS` | `43200`; Temporal waits up to 12 hours for acknowledgement. |
+| `DELIVERY_POLL_INTERVAL_SECONDS` | `10`; durable Temporal polling. |
+| `DELIVERY_REDACT_FIELDS` | Comma-separated names recursively redacted in payload, metadata and event data before storage/send. |
+| `DELIVERY_PAYLOAD_FORMAT_VERSION` | `1.0`. |
+| `DELIVERY_WEBHOOK_URL`, `DELIVERY_WEBHOOK_SECRET` | Optional fixed URL and signing secret. |
+| `DELIVERY_WEBHOOK_REQUIRE_SIGNATURE` | `true`. |
+| `DELIVERY_ALLOW_REQUEST_WEBHOOK_URL` | `false`; enable only with approved `DELIVERY_WEBHOOK_ALLOWED_HOSTS`. |
+| `DELIVERY_WEBHOOK_TIMEOUT_SECONDS` | `15`. |
+| `IDP_OPERATOR_API_KEYS` | Separate comma-separated `key:tenant` mappings; never reuse public intake keys. |
+
+`DELIVERY_RETRY_MAX` is a legacy setting and no longer controls provider retries.
+Use `DELIVERY_DURABLE_MAX_ATTEMPTS`. Payloads and reason text may be sensitive;
+restrict database/object access, encryption, backups and operator evidence.
+
+## Workflow And Retention
+New workflows use the `durable-delivery-v1` Temporal patch. They report
+`pending_delivery` or `delivery_exception`, poll rather than treating 202 as
+success, and finish `delivered` only after acknowledgement. Dead letters can be
+redriven while the workflow waits; expiration returns `delivery_timed_out`.
+The delivery queue is not automatically cancelled at that workflow deadline,
+so a later acknowledgement is still possible. Set an operational SLA and
+reconcile timed-out workflows before redrive; deadline is not proof of no effect.
+
+Retention protects jobs with active pending/leased delivery (but not operations
+already dead-lettered), and active reprocessing parents/children. Dead letters
+follow configured derived retention; resolve them before that deadline. Expired
+operations cascade attempts/work cleanup, while operator audit uses audit TTL.
+`enforce_retention.py --apply` takes exclusive maintenance locks (including reads)
+while deleting to avoid claim/register races; plan a
+maintenance window and run its dry run first. Backups are still required.
+
+## Monitoring And Verification (2026-10-01)
+Metrics: `idp_delivery_pending_destinations`,
+`idp_delivery_dead_letter_destinations`,
+`idp_delivery_oldest_unfinished_age_seconds`. Prometheus adds
+`IDPDeliveryDeadLetters` (>0 for 2 minutes) and `IDPDeliveryAgeHigh` (>15 minutes
+for 5 minutes), with rule tests. Reconciliation errors are logged without raw
+request credentials; durable failure text is categorized rather than a raw URL.
 
 ```bash
-.venv/bin/python -m unittest workflow_orchestrator.tests.test_pipeline -v
+bash scripts/run_recovery_delivery_verification.sh
 ```
 
-## Non-Goals
-- Performing extraction or validation.
-- Human-review task creation.
-- Managing downstream consumer business logic.
-
-## Change Log
-- 2026-05-21: Documentation sync update to reflect current service naming and cross-service ingestion contract expectations.
-- 2026-06-04: Implemented approval-gated modular delivery providers, object storage delivery, signed webhooks, idempotency, redaction, retries, durable receipts, status lookup, tests, and workflow contract integration.
+The isolated source-mounted profile checks crashes before send, after signed
+receiver acceptance, and after receipt PUT, concurrent requests, stale leases,
+bounded failures, tenant-denied redrive, preservation of acknowledged providers,
+immutable replay conflicts, and service restart without caller retry. A real
+receiver atomically deduplicates the delivery key in PostgreSQL; lost-ack replay
+sends identical bytes twice but applies one effect. Results:
+`artifacts/recovery-delivery/report.json`. This is functional fixture evidence,
+not representative accuracy evidence, a deployed image promotion or a claim
+that arbitrary webhook receivers provide exactly-once effects.

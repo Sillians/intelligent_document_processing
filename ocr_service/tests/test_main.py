@@ -3,6 +3,8 @@ from __future__ import annotations
 import unittest
 from typing import Any
 from unittest.mock import patch
+from fastapi import HTTPException
+from fastapi.testclient import TestClient
 
 from ocr_service.app.main import (
     TesseractEngine,
@@ -10,8 +12,9 @@ from ocr_service.app.main import (
     _extract_tokens,
     _extract_tokens_from_legacy_page,
     _extract_tokens_from_v3_page,
-    _fallback_text,
+    app,
     _normalize_input_image,
+    _execute_document_ocr,
     _run_engine,
     ready,
     settings,
@@ -43,6 +46,20 @@ class _FakePytesseract:
 
 
 class OCRServiceTests(unittest.TestCase):
+    @patch("ocr_service.app.main._execute_ocr_sync")
+    def test_document_ocr_keeps_page_order_and_fails_on_any_engine_error(self, execute) -> None:
+        pages = [
+            {"page_number": 1, "preprocessed_key": "jobs/j/preprocessed/page-0001.png"},
+            {"page_number": 2, "preprocessed_key": "jobs/j/preprocessed/page-0002.png"},
+        ]
+        execute.side_effect = [([{"text": "Invoice"}], [0.9], ""), ([{"text": "Total"}], [0.8], "")]
+        output, reason = _execute_document_ocr("j", pages)
+        self.assertEqual(reason, "")
+        self.assertEqual([page["page_number"] for page in output], [1, 2])
+        execute.side_effect = [([{"text": "Invoice"}], [0.9], ""), ([], [], "engine_execution_failed")]
+        output, reason = _execute_document_ocr("j", pages)
+        self.assertEqual(output, [])
+        self.assertEqual(reason, "page_2:engine_execution_failed")
     def test_run_engine_uses_compatible_method(self) -> None:
         result = _run_engine(_PredictOnlyEngine(), image=[[0]])
         self.assertIsInstance(result, list)
@@ -78,9 +95,13 @@ class OCRServiceTests(unittest.TestCase):
         self.assertGreaterEqual(len(tokens), 3)
         self.assertGreaterEqual(len(confidences), 3)
 
-    def test_fallback_text_prefers_reason(self) -> None:
-        text = _fallback_text(True, "service_busy")
-        self.assertEqual(text, "ocr_fallback:service_busy")
+    @patch("ocr_service.app.main._execute_ocr_sync", return_value=([], [], "engine_execution_failed"))
+    def test_ocr_engine_failure_does_not_persist_synthetic_text(self, _mocked_execute) -> None:
+        with patch.object(settings, "ocr_force_fallback", False), patch.object(settings, "ocr_backend", "paddle"):
+            response = TestClient(app).post("/ocr", json={"job_id": "job-1", "preprocessed_key": "jobs/job-1/preprocessed/page.png"})
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["detail"]["code"], "OCR_UNAVAILABLE")
+        self.assertTrue(response.json()["detail"]["retryable"])
 
     def test_normalize_input_image_gray_to_bgr(self) -> None:
         import numpy as np
@@ -103,13 +124,12 @@ class OCRServiceTests(unittest.TestCase):
         with patch.object(settings, "ocr_backend", "tesseract"), patch.object(settings, "ocr_force_fallback", True):
             self.assertEqual(_configured_backend(), "fallback")
 
-    def test_ready_accepts_explicit_fallback_mode(self) -> None:
+    def test_ready_rejects_explicit_fallback_mode(self) -> None:
         import asyncio
 
-        with patch.object(settings, "ocr_force_fallback", True):
-            payload = asyncio.run(ready())
-
-        self.assertEqual(payload, {"status": "ready", "backend": "fallback"})
+        with patch.object(settings, "ocr_force_fallback", True), self.assertRaises(HTTPException) as raised:
+            asyncio.run(ready())
+        self.assertEqual(raised.exception.status_code, 503)
 
 
 if __name__ == "__main__":

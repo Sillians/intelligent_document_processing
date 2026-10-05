@@ -11,6 +11,11 @@ from typing import Any
 SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 THRESHOLD_METRICS = {
     "min_sample_count": "sample_count",
+    "min_document_families": "document_family_count",
+    "min_samples_per_family": "min_samples_per_family",
+    "min_multi_page_samples": "multi_page_sample_count",
+    "min_ocr_reference_count": "ocr_reference_count",
+    "min_page_count_accuracy": "page_count_accuracy",
     "min_completion_rate": "completion_rate",
     "min_contract_pass_rate": "pipeline_contract_pass_rate",
     "min_route_accuracy": "route_accuracy",

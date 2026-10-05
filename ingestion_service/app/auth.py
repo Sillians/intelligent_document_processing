@@ -6,6 +6,7 @@ from fastapi import Depends, HTTPException, Request
 from prometheus_client import Counter
 
 from shared.idp_common.config import Settings, get_settings
+from shared.idp_common.tenant_scope import artifact_prefix
 
 
 @dataclass(frozen=True)
@@ -72,6 +73,10 @@ async def resolve_principal(request: Request, settings: Settings = Depends(get_s
 
     if not settings.ingestion_require_auth:
         tenant_id = tenant_header or "default"
+        try:
+            artifact_prefix(tenant_id, "validation")
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="Invalid tenant identifier") from exc
         subject = actor_header or "anonymous"
         return Principal(tenant_id=tenant_id, subject=subject, auth_scheme="none")
 
@@ -87,11 +92,16 @@ async def resolve_principal(request: Request, settings: Settings = Depends(get_s
     if not tenant_id:
         INGESTION_AUTH_FAILURES.labels("invalid_credentials").inc()
         raise HTTPException(status_code=401, detail="Invalid API credentials")
+    try:
+        artifact_prefix(tenant_id, "validation")
+    except ValueError as exc:
+        raise HTTPException(status_code=500, detail="Configured tenant identifier is invalid") from exc
 
     requested_tenant = tenant_header
     if requested_tenant and requested_tenant != tenant_id:
         INGESTION_AUTH_FAILURES.labels("tenant_scope_violation").inc()
         raise HTTPException(status_code=403, detail="Tenant scope violation")
 
-    subject = actor_header or f"api-key:{tenant_id}"
+    # An unverified client header must not become an authenticated audit identity.
+    subject = f"api-key:{tenant_id}"
     return Principal(tenant_id=tenant_id, subject=subject, auth_scheme="api-key")

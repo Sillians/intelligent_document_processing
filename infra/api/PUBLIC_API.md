@@ -104,6 +104,8 @@ Successful results end in one of two business branches:
 - `delivered`
 - `pending_human_review`
 
+As of 2026-09-30, `pending_human_review` is an intermediate snapshot. The Temporal workflow stays open and `GET /documents/{job_id}` reports `PENDING_HUMAN_REVIEW`. The same result endpoint later returns a final `delivered`, `rejected`, `review_validation_failed`, or `review_timed_out` result. Clients should continue polling after the pending snapshot. Review decisions are submitted to the internal `human_review_console` API or completed in Label Studio; they are not public gateway routes. A stored document awaiting Temporal dispatch may report `STORED` before it becomes `QUEUED`.
+
 ## Gateway Controls
 
 Traefik currently provides:

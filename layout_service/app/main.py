@@ -18,6 +18,9 @@ from pydantic import BaseModel, Field
 from shared.idp_common.config import get_settings
 from shared.idp_common.metrics import instrument_app
 from shared.idp_common.storage import download_bytes, download_json, upload_json
+from shared.idp_common.tenant_scope import artifact_key, require_artifact_scope
+from shared.idp_common.internal_auth import install_internal_auth
+from shared.idp_common.page_contract import SCHEMA_VERSION, validate_pages
 
 settings = get_settings()
 logger = logging.getLogger("layout_service")
@@ -39,12 +42,16 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="layout-service", lifespan=lifespan)
 instrument_app(app, "layout-service")
+install_internal_auth(app)
 
 
 class LayoutRequest(BaseModel):
+    page_slot: int | None = Field(default=None, ge=1, le=1000)
+    tenant_id: str = Field(default="default", min_length=1, max_length=128)
     job_id: str = Field(min_length=1, max_length=128)
     preprocessed_key: str = Field(min_length=1, max_length=1024)
     ocr_key: str = Field(min_length=1, max_length=1024)
+    preprocessed_pages: list[dict[str, Any]] | None = None
 
 
 def _try_acquire_request_slot() -> bool:
@@ -351,48 +358,82 @@ def _assign_tokens_to_blocks(blocks: list[dict[str, Any]], tokens: list[dict[str
 
 
 def _analyze_layout_sync(request: LayoutRequest) -> dict[str, Any]:
+    require_artifact_scope(request.tenant_id, request.job_id, request.preprocessed_key)
+    require_artifact_scope(request.tenant_id, request.job_id, request.ocr_key)
     started = time.perf_counter()
-    image = _decode_image(request.preprocessed_key)
     ocr_data = download_json(settings, settings.ocr_bucket, request.ocr_key)
-
-    if image is None:
-        width, height = 800, 1000
-        tokens: list[dict[str, Any]] = []
-        blocks = _heuristic_blocks_from_tokens(tokens, width=width, height=height)
-        backend = "heuristic_invalid_image"
-    else:
+    if request.page_slot is not None and (ocr_data.get("page_slot") != request.page_slot or ocr_data.get("tenant_id") != request.tenant_id or ocr_data.get("job_id") != request.job_id):
+        raise HTTPException(422, "Independent OCR artifact identity does not match layout request")
+    source_pages = validate_pages(
+        request.preprocessed_pages or [{"page_number": 1, "preprocessed_key": request.preprocessed_key}],
+        tenant_id=request.tenant_id, job_id=request.job_id, key_field="preprocessed_key", first_key=request.preprocessed_key,
+    )
+    ocr_pages = ocr_data.get("pages") or [{"page_number": 1, "tokens": ocr_data.get("tokens", [])}]
+    if len(ocr_pages) != len(source_pages):
+        raise HTTPException(status_code=422, detail="OCR page count does not match preprocessing")
+    pages: list[dict[str, Any]] = []
+    enriched_blocks: list[dict[str, Any]] = []
+    for source_page, ocr_page in zip(source_pages, ocr_pages):
+        number = source_page["page_number"]
+        if ocr_page.get("page_number") != number:
+            raise HTTPException(status_code=422, detail="OCR page order does not match preprocessing")
+        if len(source_pages) > 1 and ocr_page.get("preprocessed_key") != source_page["preprocessed_key"]:
+            raise HTTPException(status_code=422, detail="OCR page image does not match preprocessing")
+        image = _decode_image(source_page["preprocessed_key"])
+        if image is None:
+            raise HTTPException(status_code=422, detail=f"Preprocessed page {number} is unreadable")
         height, width = image.shape[:2]
-        tokens = _normalize_ocr_tokens(ocr_data, width=width, height=height)
+        tokens = _normalize_ocr_tokens(ocr_page, width=width, height=height)
         blocks, backend = _detect_layout_blocks(image)
         if not blocks:
             blocks = _heuristic_blocks_from_tokens(tokens, width=width, height=height)
-
-    enriched_blocks = _assign_tokens_to_blocks(blocks, tokens)
+        page_blocks = _assign_tokens_to_blocks(blocks, tokens)
+        for block in page_blocks:
+            block["id"] = f"p{number:04d}-{block['id']}"
+            block["page_number"] = number
+            block["reading_order"] = len(enriched_blocks)
+            enriched_blocks.append(block)
+        pages.append({"page_number": number, "preprocessed_key": source_page["preprocessed_key"],
+                      "backend": backend, "image_width": width, "image_height": height,
+                      "block_count": len(page_blocks), "ocr_tokens_with_boxes": len(tokens), "blocks": page_blocks,
+                      "full_text": "\n".join(block["text"] for block in page_blocks if block.get("text"))})
     full_text = "\n".join(block["text"] for block in enriched_blocks if block.get("text"))
     text_zone_count = sum(1 for block in enriched_blocks if block.get("text"))
 
     payload = {
         "job_id": request.job_id,
-        "backend": backend,
+        "schema_version": SCHEMA_VERSION,
+        "page_count": len(pages),
+        "pages": pages,
+        "backend": pages[0]["backend"] if len(pages) == 1 else "mixed",
         "layout_error": _LAYOUT_ERROR,
-        "image_width": width,
-        "image_height": height,
+        "image_width": pages[0]["image_width"],
+        "image_height": pages[0]["image_height"],
         "block_count": len(enriched_blocks),
         "text_zone_count": text_zone_count,
         "ocr_token_count": int(ocr_data.get("token_count") or len(tokens)),
-        "ocr_tokens_with_boxes": len(tokens),
+        "ocr_tokens_with_boxes": sum(page["ocr_tokens_with_boxes"] for page in pages),
         "full_text": full_text,
         "blocks": enriched_blocks,
         "duration_ms": round((time.perf_counter() - started) * 1000, 3),
     }
-    key = f"jobs/{request.job_id}/layout/layout.json"
+    key = artifact_key(request.tenant_id, request.job_id, "layout/layout.json")
+    if request.page_slot is not None:
+        if len(source_pages) != 1:
+            raise HTTPException(422, "Independent layout requests must contain one page")
+        key = artifact_key(request.tenant_id, request.job_id, f"layout/pages/{request.page_slot:04d}.json")
+    payload["tenant_id"] = request.tenant_id
+    payload["page_slot"] = request.page_slot
     upload_json(settings, settings.layout_bucket, key, payload)
 
     return {
         "job_id": request.job_id,
         "layout_bucket": settings.layout_bucket,
         "layout_key": key,
-        "backend": backend,
+        "schema_version": SCHEMA_VERSION,
+        "backend": payload["backend"],
+        "page_count": len(pages),
+        "duration_ms": payload["duration_ms"],
         "block_count": len(enriched_blocks),
         "text_zone_count": text_zone_count,
     }
@@ -410,7 +451,7 @@ async def analyze_layout(request: LayoutRequest) -> dict[str, Any]:
 
     future = _LAYOUT_POOL.submit(_analyze_layout_sync, request)
     future.add_done_callback(_release_request_slot)
-    timeout = max(1, int(getattr(settings, "layout_request_timeout_seconds", 90)))
+    timeout = max(1, int(settings.layout_request_timeout_seconds) * len(request.preprocessed_pages or [1]))
     try:
         return await asyncio.wait_for(asyncio.wrap_future(future), timeout=timeout)
     except asyncio.TimeoutError as exc:

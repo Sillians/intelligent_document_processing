@@ -17,6 +17,8 @@ from pydantic import BaseModel, Field
 from shared.idp_common.config import get_settings
 from shared.idp_common.metrics import instrument_app
 from shared.idp_common.storage import download_json, upload_json
+from shared.idp_common.tenant_scope import artifact_key, require_artifact_scope
+from shared.idp_common.internal_auth import install_internal_auth
 
 settings = get_settings()
 logger = logging.getLogger("extraction_service")
@@ -34,9 +36,11 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="extraction-service", lifespan=lifespan)
 instrument_app(app, "extraction-service")
+install_internal_auth(app)
 
 
 class ExtractRequest(BaseModel):
+    tenant_id: str = Field(default="default", min_length=1, max_length=128)
     job_id: str = Field(min_length=1, max_length=128)
     ocr_key: str = Field(min_length=1, max_length=1024)
     layout_key: str = Field(min_length=1, max_length=1024)
@@ -114,7 +118,7 @@ def _extract_text_from_ocr(ocr: dict[str, Any]) -> tuple[str, float, bool]:
 def _extract_text_from_layout(layout: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
     blocks = [block for block in layout.get("blocks", []) if isinstance(block, dict)]
     text_blocks = [block for block in blocks if str(block.get("text") or "").strip()]
-    ordered = sorted(text_blocks, key=lambda block: int(block.get("reading_order", 0)))
+    ordered = sorted(text_blocks, key=lambda block: (int(block.get("page_number", 1)), int(block.get("reading_order", 0))))
     text = "\n".join(_normalize_space(str(block.get("text") or "")) for block in ordered)
     return text.strip(), ordered
 
@@ -270,6 +274,8 @@ async def vlm_fallback_extract(text: str, route: str, *, strategy_profile: str |
 
 
 def _build_context_sync(request: ExtractRequest) -> dict[str, Any]:
+    require_artifact_scope(request.tenant_id, request.job_id, request.ocr_key)
+    require_artifact_scope(request.tenant_id, request.job_id, request.layout_key)
     ocr = download_json(settings, settings.ocr_bucket, request.ocr_key)
     layout = download_json(settings, settings.layout_bucket, request.layout_key)
     ocr_text, detected_ocr_confidence, ocr_fallback_used = _extract_text_from_ocr(ocr)
@@ -304,7 +310,7 @@ def _merge_llm_fields(fields: dict[str, str],
 
 def _persist_payload(request: ExtractRequest, 
                      payload: dict[str, Any]) -> tuple[str, str]:
-    key = f"jobs/{request.job_id}/extraction/result.json"
+    key = artifact_key(request.tenant_id, request.job_id, "extraction/result.json")
     extraction_bucket = settings.extraction_bucket
     try:
         upload_json(settings, extraction_bucket, key, payload)
@@ -410,4 +416,5 @@ async def extract(request: ExtractRequest) -> dict[str, Any]:
         "fields": fields,
         "confidence": confidence,
         "used_vlm_fallback": used_vlm_fallback,
+        "duration_ms": payload["duration_ms"],
     }

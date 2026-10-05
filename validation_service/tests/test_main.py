@@ -9,6 +9,20 @@ from validation_service.app.main import app, infer_route, validate_payload
 
 
 class ValidationServiceTests(unittest.TestCase):
+    def test_human_review_rechecks_required_fields_without_machine_confidence_gate(self) -> None:
+        result = validate_payload(
+            job_id="job-1", route="invoice", confidence=0.2, used_vlm_fallback=True,
+            human_review_approved=True,
+            fields={"invoice_number": "INV-1", "invoice_date": "2026-06-01", "total_amount": "42.00"},
+        )
+        self.assertEqual(result["verdict"], "human_approved")
+        self.assertFalse(result["requires_human_review"])
+        missing = validate_payload(
+            job_id="job-1", route="invoice", confidence=0.2, used_vlm_fallback=True,
+            human_review_approved=True, fields={"invoice_number": "INV-1"},
+        )
+        self.assertTrue(missing["requires_human_review"])
+
     def test_invoice_auto_approved_when_required_fields_and_confidence_pass(self) -> None:
         result = validate_payload(
             job_id="job-1",

@@ -31,6 +31,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from scripts.quality_diagnostics import quality_breakdown
+
 from scripts.full_pipeline_e2e import (
     COMPLETED_STATUS,
     E2EError,
@@ -89,6 +91,13 @@ class BenchmarkConfig:
     max_ocr_cer: float | None
     max_ocr_wer: float | None
     max_p95_latency_seconds: float | None
+    min_document_families: int | None = None
+    min_samples_per_family: int | None = None
+    min_multi_page_samples: int | None = None
+    min_ocr_reference_count: int | None = None
+    min_page_count_accuracy: float | None = None
+    min_validation_labeled_count: int | None = None
+    min_latency_sample_count: int | None = None
 
 
 @dataclass(frozen=True)
@@ -238,7 +247,7 @@ def build_config(args: argparse.Namespace) -> BenchmarkConfig:
     thresholds = load_thresholds(args.thresholds_file)
 
     def threshold(name: str) -> float | None:
-        value = getattr(args, name)
+        value = getattr(args, name, None)
         return value if value is not None else thresholds.get(name)
 
     return BenchmarkConfig(
@@ -284,6 +293,13 @@ def build_config(args: argparse.Namespace) -> BenchmarkConfig:
             "--max-p95-latency-seconds",
             threshold("max_p95_latency_seconds"),
         ),
+        min_document_families=int(threshold("min_document_families")) if threshold("min_document_families") is not None else None,
+        min_samples_per_family=int(threshold("min_samples_per_family")) if threshold("min_samples_per_family") is not None else None,
+        min_multi_page_samples=int(threshold("min_multi_page_samples")) if threshold("min_multi_page_samples") is not None else None,
+        min_ocr_reference_count=int(threshold("min_ocr_reference_count")) if threshold("min_ocr_reference_count") is not None else None,
+        min_page_count_accuracy=validate_rate("min_page_count_accuracy", threshold("min_page_count_accuracy")),
+        min_validation_labeled_count=int(threshold("min_validation_labeled_count")) if threshold("min_validation_labeled_count") is not None else None,
+        min_latency_sample_count=int(threshold("min_latency_sample_count")) if threshold("min_latency_sample_count") is not None else None,
     )
 
 
@@ -627,7 +643,7 @@ def compare_expected_fields(expected: dict[str, Any], predicted: dict[str, Any])
     comparable = {
         key: value
         for key, value in expected.items()
-        if key != "line_item_count" and value not in {"", None}
+        if key != "line_item_count" and value is not None and value != ""
     }
     matched: dict[str, bool] = {}
     for key, expected_value in comparable.items():
@@ -661,6 +677,7 @@ def compare_expected_fields(expected: dict[str, Any], predicted: dict[str, Any])
         "field_f1": round(f1, 6),
         "field_exact_match": round(recall, 6),
         "matched_fields": matched,
+        "populated_fields": {key: bool(normalize_field(key, predicted.get(key))) for key in comparable},
         "line_item_expected_count": line_item_expected,
         "line_item_match": line_item_match,
     }
@@ -682,6 +699,14 @@ def build_sample_metrics(
     extraction = result.get("extraction") if isinstance(result.get("extraction"), dict) else {}
     ocr = result.get("ocr") if isinstance(result.get("ocr"), dict) else {}
     classification = result.get("classification") if isinstance(result.get("classification"), dict) else {}
+    preprocess = result.get("preprocess") if isinstance(result.get("preprocess"), dict) else {}
+    layout = result.get("layout") if isinstance(result.get("layout"), dict) else {}
+    stage_results = {"preprocess": preprocess, "ocr": ocr, "layout": layout, "classification": classification, "extraction": extraction, "validation": validation}
+    stage_duration_ms = {
+        name: safe_float((stage.get("metadata") or {}).get("duration_ms") if name == "preprocess" else stage.get("duration_ms"))
+        for name, stage in stage_results.items()
+        if isinstance((stage.get("metadata") or {}).get("duration_ms") if name == "preprocess" else stage.get("duration_ms"), (int, float))
+    }
 
     route = str(extraction.get("route") or validation.get("route") or classification.get("route") or "unknown")
     workflow_status = str(result.get("status") or runtime_status)
@@ -693,10 +718,18 @@ def build_sample_metrics(
     validation_correct = (
         validation_verdict == expected_validation_verdict
         if expected_validation_verdict
-        else requires_human_review == expected_requires_human_review
+        else None
     )
     return {
         "sample_id": sample.sample_id,
+        "stage_duration_ms": stage_duration_ms,
+        "document_family": str(sample.metadata.get("document_family") or sample.expected_route),
+        "expected_page_count": sample.metadata.get("expected_page_count"),
+        "actual_page_count": (result.get("preprocess") or {}).get("page_count"),
+        "page_count_match": (
+            (result.get("preprocess") or {}).get("page_count") == sample.metadata.get("expected_page_count")
+            if isinstance(sample.metadata.get("expected_page_count"), int) else None
+        ),
         "dataset": sample.dataset,
         "split": sample.split,
         "runtime_status": runtime_status,
@@ -708,12 +741,12 @@ def build_sample_metrics(
         "ocr_reference_available": bool(sample.expected_ocr_text.strip()),
         "ocr_cer": error_rate(sample.expected_ocr_text, predicted_ocr_text, words=False),
         "ocr_wer": error_rate(sample.expected_ocr_text, predicted_ocr_text, words=True),
-        "extraction_confidence": safe_float(extraction.get("confidence")),
+        "extraction_confidence": safe_float(extraction.get("confidence")) if extraction.get("confidence") is not None else None,
         "requires_human_review": requires_human_review,
         "validation_verdict": validation_verdict,
         "expected_validation_verdict": expected_validation_verdict or None,
         "expected_requires_human_review": expected_requires_human_review,
-        "validation_expectation_source": "explicit_verdict" if expected_validation_verdict else "field_correctness",
+        "validation_expectation_source": "explicit_verdict" if expected_validation_verdict else "unlabeled",
         "validation_correct": validation_correct,
         "latency_seconds": round(latency_seconds, 6) if latency_seconds is not None else None,
         "pipeline_contract_passed": not validation_errors,
@@ -770,8 +803,26 @@ def aggregate_metrics(
         if item.get("latency_seconds") is not None
     ]
     elapsed = max(0.0, elapsed_seconds or 0.0)
+    stage_names = {name for item in sample_metrics for name in (item.get("stage_duration_ms") or {})}
+    stage_p95_ms = {
+        name: round(percentile([item["stage_duration_ms"][name] for item in sample_metrics if name in (item.get("stage_duration_ms") or {})], 0.95) or 0, 3)
+        for name in sorted(stage_names)
+    }
+    families: dict[str, int] = {}
+    for item in sample_metrics:
+        family = str(item.get("document_family") or "unknown")
+        families[family] = families.get(family, 0) + 1
+    page_labeled = [item for item in sample_metrics if item.get("page_count_match") is not None]
     return {
+        **quality_breakdown(sample_metrics),
         "sample_count": total,
+        "stage_p95_ms": stage_p95_ms,
+        "document_family_counts": families,
+        "document_family_count": len(families),
+        "min_samples_per_family": min(families.values()) if families else 0,
+        "multi_page_sample_count": sum(1 for item in sample_metrics if isinstance(item.get("expected_page_count"), int) and item["expected_page_count"] > 1),
+        "page_count_labeled_count": len(page_labeled),
+        "page_count_accuracy": round(sum(bool(item["page_count_match"]) for item in page_labeled) / len(page_labeled), 6) if page_labeled else None,
         "completed_count": completed,
         "completion_rate": round(completed / total, 6) if total else 0.0,
         "pipeline_contract_pass_count": contract_passed,
@@ -785,7 +836,11 @@ def aggregate_metrics(
         "ocr_reference_count": len(ocr_cer_values),
         "ocr_cer_mean": round(mean(ocr_cer_values), 6) if ocr_cer_values else None,
         "ocr_wer_mean": round(mean(ocr_wer_values), 6) if ocr_wer_values else None,
-        "extraction_confidence_mean": round(mean(safe_float(item.get("extraction_confidence")) for item in sample_metrics), 6),
+        "extraction_confidence_mean": (
+            round(mean(safe_float(item["extraction_confidence"]) for item in sample_metrics
+                       if item.get("extraction_confidence") is not None), 6)
+            if any(item.get("extraction_confidence") is not None for item in sample_metrics) else None
+        ),
         "validation_labeled_count": len(validation_values),
         "validation_accuracy": (
             round(sum(validation_values) / len(validation_values), 6) if validation_values else None
@@ -845,9 +900,22 @@ def evaluate_quality_gate(config: BenchmarkConfig, aggregate: dict[str, Any], er
 
     add_min("completion_rate", "completion_rate", config.min_completion_rate)
     add_min("sample_count", "sample_count", float(config.min_sample_count) if config.min_sample_count else None)
+    add_min("document_family_count", "document_family_count", config.min_document_families)
+    add_min("min_samples_per_family", "min_samples_per_family", config.min_samples_per_family)
+    add_min("multi_page_sample_count", "multi_page_sample_count", config.min_multi_page_samples)
+    add_min("ocr_reference_count", "ocr_reference_count", config.min_ocr_reference_count)
+    add_min("page_count_accuracy", "page_count_accuracy", config.min_page_count_accuracy)
+    add_min("validation_labeled_count", "validation_labeled_count", config.min_validation_labeled_count)
+    add_min("latency_sample_count", "latency_sample_count", config.min_latency_sample_count)
     add_min("pipeline_contract_pass_rate", "pipeline_contract_pass_rate", config.min_contract_pass_rate)
     add_min("route_accuracy", "route_accuracy", config.min_route_accuracy)
     add_min("field_f1_mean", "field_f1_mean", config.min_field_f1)
+    if config.min_field_f1 is not None:
+        for family, metrics in aggregate.get('by_document_family', {}).items():
+            actual = metrics.get('field_f1_mean')
+            checks.append({'name': 'family_field_f1:' + family, 'metric': 'by_document_family.' + family + '.field_f1_mean',
+                'operator': '>=', 'threshold': config.min_field_f1, 'actual': actual,
+                'passed': actual is not None and actual >= config.min_field_f1})
     add_min(
         "validation_accuracy",
         "validation_accuracy",
@@ -993,6 +1061,18 @@ def run_sample(config: BenchmarkConfig, sample: BenchmarkSample, index: int) -> 
 def run(config: BenchmarkConfig) -> dict[str, Any]:
     config.artifact_dir.mkdir(parents=True, exist_ok=True)
     write_json(config.artifact_dir / "config.json", redacted_config(config))
+    policy = {}
+    preflight = {'passed': False}
+    if config.thresholds_file:
+        policy = json.loads(config.thresholds_file.read_text())
+        if policy.get('status') == 'approved':
+            if config.manifest is None or config.offset or config.shuffle:
+                raise E2EError('Approved evidence requires an exact, unshuffled manifest selection with offset zero')
+            from scripts.validate_benchmark_manifest import validate
+            preflight = validate(config.manifest.resolve(), policy, config.limit)
+            write_json(config.artifact_dir / 'manifest_preflight.json', preflight)
+            if not preflight['passed']:
+                raise E2EError('Approved manifest preflight failed: ' + '; '.join(preflight['errors']))
 
     sample_metrics: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
@@ -1025,6 +1105,9 @@ def run(config: BenchmarkConfig) -> dict[str, Any]:
     aggregate = aggregate_metrics(sample_metrics, elapsed_seconds)
     quality_gate = evaluate_quality_gate(config, aggregate, len(errors))
     summary = {
+        'dataset_evidence': {'policy_status': policy.get('status', 'unreviewed'),
+            'representative_eligible': policy.get('status') == 'approved' and preflight['passed'] and not config.dry_run,
+            'scope': 'Measured gate result is not an automatic production approval'},
         "dataset": config.dataset,
         "split": config.split,
         "artifact_dir": str(config.artifact_dir),

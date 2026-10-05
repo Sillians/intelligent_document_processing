@@ -63,10 +63,21 @@ jobs:
           tests.test_promotion_evidence
           tests.test_retention
           tests.test_staging_operational_drill
+          tests.test_tenant_scope
+          tests.test_upload_recovery
+          tests.test_page_contract
+          tests.test_page_execution
+          tests.test_quality_diagnostics
+          tests.test_benchmark_manifest
+          tests.test_service_boundaries
+          ingestion_service.tests.test_dispatch
+          ingestion_service.tests.test_auth
+          ingestion_service.tests.test_reprocessing
           tests.client_api.test_public_contract
           tests.e2e.test_full_pipeline_e2e
           tests.benchmarks.test_dataset_benchmark
           workflow_orchestrator.tests.test_pipeline
+          workflow_orchestrator.tests.test_workflows
           workflow_orchestrator.tests.test_activities
           workflow_orchestrator.tests.test_metrics
           classifier_router_service.tests.test_main
@@ -78,6 +89,8 @@ jobs:
           preprocess_worker.tests.test_main
           ocr_service.tests.test_main
           layout_service.tests.test_main
+          tests.test_ocr_failure
+          tests.test_secondary_ocr
           -v
 
   compose-and-preflight:

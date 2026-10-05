@@ -26,6 +26,9 @@ SECRET_KEYS = {
     "GRAFANA_ADMIN_PASSWORD",
     "ALERT_EMAIL_PASSWORD",
     "BACKUP_ENCRYPTION_KEY",
+    "IDP_INTERNAL_API_KEY",
+    "REVIEW_DECISION_API_KEY",
+    "REVIEW_DECISION_API_KEYS",
 }
 REQUIRED_KEYS = {
     "ENVIRONMENT",
@@ -49,6 +52,12 @@ REQUIRED_KEYS = {
     "BACKUP_ENCRYPTION_KEY",
     "INFRASTRUCTURE_PROFILE",
     "OCR_BACKEND",
+    "IDP_REQUIRE_INTERNAL_AUTH",
+    "IDP_INTERNAL_API_KEY",
+    "REVIEW_DECISION_API_KEY",
+    "REVIEW_DECISION_API_KEYS",
+    "REVIEW_WAIT_TIMEOUT_SECONDS",
+    "INGESTION_WORKFLOW_TIMEOUT_MINUTES",
 }
 
 
@@ -135,6 +144,17 @@ def check_env(
 
     if is_false(values.get("INGESTION_REQUIRE_AUTH", "")):
         failures.append("INGESTION_REQUIRE_AUTH must be true in production")
+    if not is_true(values.get("IDP_REQUIRE_INTERNAL_AUTH", "")):
+        failures.append("IDP_REQUIRE_INTERNAL_AUTH must be true")
+    if not is_true(values.get("REVIEW_PERSIST_TASKS", "")):
+        failures.append("REVIEW_PERSIST_TASKS must be true for review completion")
+    for key in ("IDP_INTERNAL_API_KEY", "REVIEW_DECISION_API_KEY"):
+        if len(values.get(key, "")) < 32:
+            failures.append(f"{key} must contain at least 32 characters")
+    review_seconds = positive_int(values, "REVIEW_WAIT_TIMEOUT_SECONDS", failures)
+    workflow_minutes = positive_int(values, "INGESTION_WORKFLOW_TIMEOUT_MINUTES", failures)
+    if review_seconds and workflow_minutes and workflow_minutes * 60 < review_seconds + 3600:
+        failures.append("INGESTION_WORKFLOW_TIMEOUT_MINUTES must exceed review timeout by at least one hour")
 
     api_keys = values.get("INGESTION_API_KEYS", "")
     parsed_keys: list[tuple[str, str]] = []
@@ -151,6 +171,17 @@ def check_env(
             parsed_keys.append((api_key.strip(), tenant.strip()))
     if len({api_key for api_key, _ in parsed_keys}) != len(parsed_keys):
         failures.append("INGESTION_API_KEYS must not contain duplicate API keys")
+    review_tenants: set[str] = set()
+    for entry in values.get("REVIEW_DECISION_API_KEYS", "").split(","):
+        if ":" not in entry:
+            failures.append("REVIEW_DECISION_API_KEYS entries must use api-key:tenant-id format")
+            continue
+        review_key, tenant = entry.split(":", 1)
+        if len(review_key.strip()) < 32:
+            failures.append("REVIEW_DECISION_API_KEYS keys must contain at least 32 characters")
+        review_tenants.add(tenant.strip())
+    if not {tenant for _, tenant in parsed_keys}.issubset(review_tenants):
+        failures.append("REVIEW_DECISION_API_KEYS must cover every ingestion tenant")
 
     for key in sorted(SECRET_KEYS):
         value = values.get(key, "")

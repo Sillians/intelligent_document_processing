@@ -51,6 +51,12 @@ gateway usable for smoke tests. Production still uses
 `infra/traefik/dynamic.production.yml`, which permanently redirects HTTP to
 HTTPS.
 
+On macOS self-hosted runners, Docker Desktop must be running and unpaused under
+the same user that runs the GitHub runner. `Deploy Staging` uses
+`unix://$HOME/.docker/run/docker.sock` by default on macOS because the workflow's
+temporary Docker auth config does not include Docker Desktop contexts. If your
+runner uses another socket, set `STAGING_DOCKER_HOST`.
+
 `STAGING_ENV_FILE` must contain the complete staging environment file. Updating
 a checkout's local `.env.staging` does not update the GitHub secret.
 

@@ -16,6 +16,8 @@ from pydantic import BaseModel, Field
 from shared.idp_common.config import get_settings
 from shared.idp_common.metrics import instrument_app
 from shared.idp_common.storage import download_json, upload_json
+from shared.idp_common.tenant_scope import artifact_key, require_artifact_scope
+from shared.idp_common.internal_auth import install_internal_auth
 
 settings = get_settings()
 logger = logging.getLogger("validation_service")
@@ -33,9 +35,11 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="validation-service", lifespan=lifespan)
 instrument_app(app, "validation-service")
+install_internal_auth(app)
 
 
 class ValidationRequest(BaseModel):
+    tenant_id: str = Field(default="default", min_length=1, max_length=128)
     job_id: str = Field(min_length=1, max_length=128)
     extraction_key: str = Field(min_length=1, max_length=1024)
     extraction_bucket: str | None = Field(default=None, min_length=1, max_length=128)
@@ -43,6 +47,7 @@ class ValidationRequest(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
     used_vlm_fallback: bool
     route: str | None = Field(default=None, max_length=64)
+    human_review_approved: bool = False
 
 
 @dataclass(frozen=True)
@@ -184,6 +189,7 @@ def validate_payload(
     field_confidences: dict[str, Any] | None = None,
     extraction_key: str = "",
     artifact_loaded: bool = False,
+    human_review_approved: bool = False,
 ) -> dict[str, Any]:
     normalized_fields = normalize_fields(fields)
     resolved_route = infer_route(normalized_fields, route)
@@ -242,7 +248,7 @@ def validate_payload(
     )
 
     min_field_confidence = float(getattr(settings, "validation_min_field_confidence", 0.60))
-    low_confidence_fields = [
+    low_confidence_fields = [] if human_review_approved else [
         field
         for field in ruleset.required_fields
         if _is_present(normalized_fields, field)
@@ -259,35 +265,35 @@ def validate_payload(
         }
     )
 
-    if confidence < settings.auto_approve_threshold:
+    if confidence < settings.auto_approve_threshold and not human_review_approved:
         reasons.append(f"low_confidence:{confidence:.3f}")
     rule_results.append(
         {
             "rule": "document_confidence",
-            "status": "failed" if confidence < settings.auto_approve_threshold else "passed",
+            "status": "failed" if confidence < settings.auto_approve_threshold and not human_review_approved else "passed",
             "threshold": settings.auto_approve_threshold,
             "actual": round(confidence, 4),
         }
     )
 
-    if used_vlm_fallback and not ruleset.allow_vlm_auto_approval:
+    if used_vlm_fallback and not ruleset.allow_vlm_auto_approval and not human_review_approved:
         reasons.append("llm_fallback_requires_review")
     rule_results.append(
         {
             "rule": "llm_fallback_policy",
-            "status": "failed" if used_vlm_fallback and not ruleset.allow_vlm_auto_approval else "passed",
+            "status": "failed" if used_vlm_fallback and not ruleset.allow_vlm_auto_approval and not human_review_approved else "passed",
             "used_vlm_fallback": used_vlm_fallback,
         }
     )
 
     populated_count = sum(1 for value in normalized_fields.values() if value)
     auto_reject_threshold = float(getattr(settings, "validation_auto_reject_threshold", 0.25))
-    reject = populated_count == 0 or (confidence < auto_reject_threshold and missing_required)
+    reject = populated_count == 0 or (not human_review_approved and confidence < auto_reject_threshold and missing_required)
     if reject:
         reasons.append("reject_unusable_extraction")
 
     requires_human_review = bool(reasons)
-    verdict = "rejected" if reject else "needs_review" if requires_human_review else "auto_approved"
+    verdict = "rejected" if reject else "needs_review" if requires_human_review else "human_approved" if human_review_approved else "auto_approved"
 
     return {
         "job_id": job_id,
@@ -327,8 +333,9 @@ def _load_extraction_artifact(request: ValidationRequest) -> tuple[dict[str, Any
     return artifact, True
 
 
-def _persist_payload(job_id: str, payload: dict[str, Any]) -> tuple[str, str]:
-    key = f"jobs/{job_id}/validation/result.json"
+def _persist_payload(job_id: str, payload: dict[str, Any], *, tenant_id: str = "default", human_review_approved: bool = False) -> tuple[str, str]:
+    name = "review_result.json" if human_review_approved else "result.json"
+    key = artifact_key(tenant_id, job_id, f"validation/{name}")
     validation_bucket = getattr(settings, "validation_bucket", "validation-artifacts")
     try:
         upload_json(settings, validation_bucket, key, payload)
@@ -350,10 +357,13 @@ def _persist_payload(job_id: str, payload: dict[str, Any]) -> tuple[str, str]:
 
 def _validate_sync(request: ValidationRequest) -> dict[str, Any]:
     started = time.perf_counter()
-    artifact, artifact_loaded = _load_extraction_artifact(request)
-    fields = artifact.get("fields") if isinstance(artifact.get("fields"), dict) else request.fields
+    require_artifact_scope(request.tenant_id, request.job_id, request.extraction_key)
+    if request.extraction_bucket and request.extraction_bucket not in {settings.extraction_bucket, settings.layout_bucket}:
+        raise HTTPException(status_code=403, detail="Extraction bucket is outside pipeline scope")
+    artifact, artifact_loaded = ({}, False) if request.human_review_approved else _load_extraction_artifact(request)
+    fields = request.fields if request.human_review_approved else artifact.get("fields") if isinstance(artifact.get("fields"), dict) else request.fields
     route = request.route or artifact.get("route")
-    confidence = float(artifact.get("confidence", request.confidence))
+    confidence = request.confidence if request.human_review_approved else float(artifact.get("confidence", request.confidence))
     used_vlm_fallback = bool(artifact.get("used_vlm_fallback", request.used_vlm_fallback))
     field_confidences = artifact.get("field_confidences") if isinstance(artifact.get("field_confidences"), dict) else {}
 
@@ -366,10 +376,11 @@ def _validate_sync(request: ValidationRequest) -> dict[str, Any]:
         field_confidences=field_confidences,
         extraction_key=request.extraction_key,
         artifact_loaded=artifact_loaded,
+        human_review_approved=request.human_review_approved,
     )
     payload["duration_ms"] = round((time.perf_counter() - started) * 1000, 3)
     if bool(getattr(settings, "validation_persist_decision", True)):
-        bucket, key = _persist_payload(request.job_id, payload)
+        bucket, key = _persist_payload(request.job_id, payload, tenant_id=request.tenant_id, human_review_approved=request.human_review_approved)
         payload["validation_bucket"] = bucket
         payload["validation_key"] = key
     return payload

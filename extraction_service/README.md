@@ -139,3 +139,27 @@ Run tests:
 - 2026-05-26: Added resilient artifact persistence fallback from `EXTRACTION_BUCKET` to `LAYOUT_BUCKET`.
 - 2026-06-02: Implemented route-aware structured extraction, layout text integration, bounded worker execution, LangChain/vLLM fallback controls, richer confidence metadata, and unit tests.
 - 2026-06-02: Changed local default to deterministic extraction for Apple Silicon/MPS development and documented optional Ollama, LM Studio, and GPU vLLM fallback endpoints.
+
+## 2026-09-30: Tenant Scope
+
+`POST /extract` now checks that OCR and layout references belong to the declared tenant and job. Extracted artifact keys use the tenant prefix for non-default tenants. The orchestrator supplies `tenant_id` and the shared internal credential. Configure `IDP_REQUIRE_INTERNAL_AUTH=true` and `IDP_INTERNAL_API_KEY` in deployed environments.
+# Page-Aware Input (2026-09-30)
+
+Extraction consumes aggregated OCR text and layout blocks ordered by `(page_number, reading_order)`, so later-page fields are visible without flattening page-local coordinates. The response now includes `duration_ms` for boundary measurements. Extraction remains document-level; cross-page field provenance is not yet a first-class output.
+
+## 2026-10-01: Tenant Boundary Verification
+
+This service's processing endpoint is included in the live intake/authorization
+acceptance gate. A call without its internal service credential returns `401`;
+authorized calls referring to another tenant/job's artifacts return `403` before
+processing those objects. Review uses its dedicated tenant/worker credentials
+for decisions and also rejects an operator key bound to another tenant.
+
+Run `bash scripts/run_ingestion_verification.sh` from the repository root. Inspect
+`artifacts/ingestion-recovery/tenant-boundaries.json`. The profile is isolated,
+uses local fixture credentials, and leaves its services running after the test.
+Keep processing APIs private: a shared internal key authenticates a trusted
+service, not an end-user tenant principal. Public tenant access is mediated by
+ingestion. See `infra/architecture/IMPLEMENTATION_ORDER.md` for the next exception,
+delivery, page-execution, and representative-quality milestones; this gate does
+not mark those implementations complete.

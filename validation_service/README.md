@@ -163,3 +163,24 @@ Run the focused workflow contract tests:
 ## Change Log
 - 2026-05-21: Documentation sync update to reflect current service naming and cross-service ingestion contract expectations.
 - 2026-06-03: Implemented route-aware validation, confidence gating, rule reason codes, artifact persistence, bounded worker execution, tests, and run instructions.
+
+## 2026-09-30: Human Correction Validation
+
+`POST /validate` accepts `human_review_approved=true` only from the trusted internal pipeline. In that mode it validates submitted corrected fields against required fields and formats without reapplying machine confidence or VLM auto-approval gates. It writes `validation/review_result.json` and returns `human_approved` only when those business checks pass; otherwise delivery is blocked. The extraction reference is checked against the tenant/job scope. Set `IDP_REQUIRE_INTERNAL_AUTH=true` and `IDP_INTERNAL_API_KEY` for staging and production.
+
+## 2026-10-01: Tenant Boundary Verification
+
+This service's processing endpoint is included in the live intake/authorization
+acceptance gate. A call without its internal service credential returns `401`;
+authorized calls referring to another tenant/job's artifacts return `403` before
+processing those objects. Review uses its dedicated tenant/worker credentials
+for decisions and also rejects an operator key bound to another tenant.
+
+Run `bash scripts/run_ingestion_verification.sh` from the repository root. Inspect
+`artifacts/ingestion-recovery/tenant-boundaries.json`. The profile is isolated,
+uses local fixture credentials, and leaves its services running after the test.
+Keep processing APIs private: a shared internal key authenticates a trusted
+service, not an end-user tenant principal. Public tenant access is mediated by
+ingestion. See `infra/architecture/IMPLEMENTATION_ORDER.md` for the next exception,
+delivery, page-execution, and representative-quality milestones; this gate does
+not mark those implementations complete.

@@ -38,6 +38,13 @@ class ProductionPreflightTests(unittest.TestCase):
             "OCR_BACKEND": "tesseract",
             "ORCHESTRATOR_ENABLE_OCR_NETWORK_FALLBACK": "false",
             "REVIEW_FALLBACK_TO_LOCAL_QUEUE": "false",
+            "REVIEW_PERSIST_TASKS": "true",
+            "IDP_REQUIRE_INTERNAL_AUTH": "true",
+            "IDP_INTERNAL_API_KEY": "i" * 32,
+            "REVIEW_DECISION_API_KEY": "r" * 32,
+            "REVIEW_DECISION_API_KEYS": f"{'v' * 32}:default",
+            "REVIEW_WAIT_TIMEOUT_SECONDS": "604800",
+            "INGESTION_WORKFLOW_TIMEOUT_MINUTES": "11520",
             "LABEL_STUDIO_ENABLE_LEGACY_API_TOKEN": "false",
             "LABEL_STUDIO_AUTH_SCHEME": "pat",
         }

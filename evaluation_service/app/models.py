@@ -9,6 +9,7 @@ from shared.idp_common.config import Settings
 
 class EvaluationRequest(BaseModel):
     job_id: str = Field(min_length=1, max_length=128)
+    tenant_id: str = Field(default="default", min_length=1, max_length=128)
     status: str = Field(min_length=1, max_length=64)
     ocr_confidence: float = Field(ge=0.0, le=1.0)
     extraction_confidence: float = Field(ge=0.0, le=1.0)
@@ -34,4 +35,3 @@ class EvaluationContext:
     metrics: dict[str, float]
     parameters: dict[str, str]
     tags: dict[str, str]
-

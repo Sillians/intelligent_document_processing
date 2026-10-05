@@ -1,5 +1,37 @@
 # GitHub Automation
 
+## Page And Quality Coverage (2026-10-03)
+CI adds `tests.test_page_execution` and `tests.test_quality_diagnostics` for scoped
+aggregation, stable page activity IDs, coordinate/order preservation and
+labeled-only diagnostics. Manifest tests cover approved evidence provenance.
+Benchmark policy now includes explicit validation-label and latency-sample floors;
+family-level F1 must pass, not just its average. Direct approved benchmark runs
+preflight exact unshuffled manifests before submission. These are local changes;
+passing unit tests are not a verified remote workflow or production promotion.
+Local verification passed the full CI unit/contract list (190 tests), the real
+two-page retry/restart-to-delivery drill and 18 history replays. The verification
+profile omits evaluation tracking; representative quality acceptance is pending
+a permissioned reviewed real-document corpus. See `infra/verification/README.md`.
+
+## Recovery And Delivery Coverage (2026-10-01)
+
+The unit/contract CI list now includes `ingestion_service.tests.test_reprocessing`.
+It also runs the explicit typed OCR failure and real-secondary validation unit
+modules (`tests.test_ocr_failure`, `tests.test_secondary_ocr`).
+It checks separate operator authorization, tenant impersonation denial,
+source-integrity/outage rejection before registration, and immutable request
+replay/conflicts. Delivery unit tests cover durable registration, partial failures,
+receipt projection without destination resend, historical receipt fail-closed
+behavior and scoped reads. Workflow tests prevent pending/dead-letter delivery
+from being reported delivered. Prometheus rule tests add dead-letter and
+unfinished-delivery-age alerts.
+
+Run `bash scripts/run_recovery_delivery_verification.sh` on the initialized
+isolated Docker profile for real SQL/Temporal/Label Studio/S3/receiver recovery
+evidence. This manual live gate is not automatically dispatched by hosted CI;
+its passing local report is not a successful GitHub run or production image
+approval. It deliberately interrupts services only in that verification project.
+
 This directory contains the repository automation for the current CI/CD
 milestone. The goal is to protect the production Docker Compose baseline,
 publish release-candidate artifacts, deploy continuously to staging, and promote
@@ -471,6 +503,20 @@ credential helper, which can fail in non-interactive runner jobs with:
 error saving credentials: error storing credentials - err: exit status 1, out: `User interaction is not allowed. (-25308)`
 ```
 
+Because that temporary Docker config does not include Docker Desktop's saved
+contexts, `Deploy Staging` points Docker directly at the macOS Docker Desktop
+socket:
+
+```text
+unix://$HOME/.docker/run/docker.sock
+```
+
+If your runner uses a different socket, set the staging variable:
+
+```text
+STAGING_DOCKER_HOST=unix:///path/to/docker.sock
+```
+
 Release Candidate images are published for `linux/amd64`. Docker Desktop on
 Apple Silicon can run them through emulation. The staging OCR/layout images are
 kept lightweight to avoid pulling multi-gigabyte PaddleOCR/Torch layers during
@@ -596,3 +642,67 @@ Dependabot checks:
 - Add manual approval rules to the GitHub `staging` environment if desired.
 - Add image vulnerability scanning before production promotion.
 - Add automated restore drills on isolated infrastructure.
+
+### Runner-local representative benchmark setup
+
+`STAGING_BENCHMARK_MANIFEST` is a GitHub **staging environment variable**, not
+an API secret or a relative checkout path. It points to an existing JSONL file
+on the self-hosted runner. Do not substitute the single synthetic smoke invoice
+for a representative gold set.
+
+Each selected row must contain `sample_id`, absolute `image_path`, file `sha256`,
+`document_family`, positive `expected_page_count`, and `ground_truth` with
+`expected_route` and nonempty `expected_fields`. Supply `expected_ocr_text` for
+OCR scoring. Include `provenance.source`, `provenance.usage_permission`, and
+`provenance.label_reviewer`. Permission declarations need human verification.
+The preflight checks content hashes, duplicate files, labels, and policy coverage;
+it does not render documents or verify the correctness of annotations.
+
+After providing and reviewing the gold set, run from the repository:
+
+```bash
+MANIFEST=/absolute/path/on/runner/gold_manifest.jsonl
+python3 scripts/validate_benchmark_manifest.py --manifest "$MANIFEST" \
+  --policy infra/staging/release_acceptance.json --limit 20 \
+  --output artifacts/manifest_preflight.json
+gh variable set STAGING_BENCHMARK_MANIFEST --env staging \
+  --repo Sillians/intelligent_document_processing --body "$MANIFEST"
+gh workflow run benchmark-staging.yml --ref main \
+  --repo Sillians/intelligent_document_processing -f limit=20 -f concurrency=1
+```
+
+Authenticate `gh` first. Commit and deploy the benchmark implementation before
+running it: the workflow checks out the deployed SHA, not uncommitted local code.
+Ensure that the runner's Docker context contains the IDP staging stack and that
+its API is reachable. The current bootstrap policy requires at least 20 samples,
+three document families with at least five samples each, five multipage samples,
+and 15 OCR references. Only the first `limit` rows are selected.
+
+The workflow writes `manifest_preflight.json` before submitting documents. A
+failed preflight fails the job. Missing artifacts no longer obscure an earlier
+failure. Benchmark evidence is not production approval: the acceptance policy
+remains bootstrap until reviewed and approved.
+
+### Synthetic bootstrap and explicit Docker endpoint
+
+See `infra/staging/README.md` for the reproducible 20-document synthetic corpus
+and the local `idp-staging` OrbStack context. Synthetic results are functional
+checks, not production quality evidence. Set `STAGING_DOCKER_HOST` for Actions
+because its temporary Docker credential configuration does not retain local
+named contexts. Repository access through the connected GitHub integration is
+confirmed; it is separate from CLI authentication.
+
+## 2026-10-01: Intake Recovery Contract Coverage
+
+CI's unit/contract step now includes `tests.test_upload_recovery` and
+`ingestion_service.tests.test_auth`, alongside dispatch and tenant-scope tests.
+They cover integrity recovery, transient storage preservation, upload expiry,
+audit-identity protection, tenant impersonation denial, and lost Temporal-start
+acknowledgement reuse. They do not start Docker in hosted CI.
+
+Run `bash scripts/run_ingestion_verification.sh` on the configured local engine
+for the real database/storage/Temporal crash-window and eight-stage HTTP boundary
+gate. See `infra/verification/README.md`. Its source-mounted fixture reports are
+not GitHub workflow evidence, image promotion approval, or representative quality
+acceptance; the remaining milestone order is documented in
+`infra/architecture/IMPLEMENTATION_ORDER.md`.

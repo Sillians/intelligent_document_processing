@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 
 from delivery_service.app.models import DeliveryContext
 from shared.idp_common.storage import upload_json
+from shared.idp_common.tenant_scope import artifact_key
 
 
 class DeliveryProvider(Protocol):
@@ -23,7 +24,7 @@ class ObjectStorageProvider:
     name = "object_storage"
 
     async def deliver(self, context: DeliveryContext) -> dict[str, Any]:
-        key = f"jobs/{context.request.job_id}/delivery/{context.delivery_id}/payload.json"
+        key = artifact_key(context.request.tenant_id, context.request.job_id, f"delivery/{context.delivery_id}/payload.json")
         artifact = await asyncio.to_thread(
             upload_json,
             context.settings,
@@ -45,10 +46,10 @@ class WebhookProvider:
 
     async def deliver(self, context: DeliveryContext) -> dict[str, Any]:
         configured_url = str(getattr(context.settings, "delivery_webhook_url", "")).strip()
-        url = context.request.webhook_url or configured_url
+        url = context.target_url or context.request.webhook_url or configured_url
         if not url:
             raise ValueError("webhook destination requires webhook_url or DELIVERY_WEBHOOK_URL")
-        if context.request.webhook_url:
+        if context.request.webhook_url and context.target_url is None:
             if not bool(getattr(context.settings, "delivery_allow_request_webhook_url", False)):
                 raise ValueError("per-request webhook_url is disabled")
             allowed_hosts = {
@@ -66,6 +67,7 @@ class WebhookProvider:
             "Idempotency-Key": context.delivery_id,
             "X-IDP-Delivery-Id": context.delivery_id,
             "X-IDP-Job-Id": context.request.job_id,
+            "X-IDP-Tenant-Id": context.request.tenant_id,
         }
         secret = str(getattr(context.settings, "delivery_webhook_secret", ""))
         if bool(getattr(context.settings, "delivery_webhook_require_signature", True)) and not secret:

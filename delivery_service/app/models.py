@@ -9,6 +9,7 @@ from shared.idp_common.config import Settings
 
 class DeliveryRequest(BaseModel):
     job_id: str = Field(min_length=1, max_length=128)
+    tenant_id: str = Field(default="default", min_length=1, max_length=128)
     payload: dict[str, Any]
     approval_status: str | None = Field(default=None, max_length=64)
     destinations: list[str] | None = None
@@ -39,3 +40,4 @@ class DeliveryContext:
     request: DeliveryRequest
     delivery_id: str
     envelope: dict[str, Any]
+    target_url: str | None = None

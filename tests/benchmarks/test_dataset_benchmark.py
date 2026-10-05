@@ -7,6 +7,10 @@ from pathlib import Path
 
 from scripts.run_dataset_benchmark import (
     BenchmarkConfig,
+    BenchmarkSample,
+    build_sample_metrics,
+    run,
+    E2EError,
     aggregate_metrics,
     build_config,
     compare_expected_fields,
@@ -20,6 +24,46 @@ from scripts.run_dataset_benchmark import (
 
 
 class DatasetBenchmarkTests(unittest.TestCase):
+    def test_approved_policy_rejects_unreviewed_adapter_before_submission(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            policy = root / 'policy.json'
+            policy.write_text(json.dumps({'status':'approved','thresholds':{}}))
+            config = self._benchmark_config(dataset='cord-v2', manifest=None, thresholds_file=policy,
+                                            artifact_dir=root / 'output')
+            with self.assertRaises(E2EError):
+                run(config)
+
+    def test_validation_accuracy_requires_explicit_gold_verdict(self):
+        sample = BenchmarkSample('one','manifest','test',None,{}, {'total':'42'},'invoice',{})
+        metrics = build_sample_metrics(sample=sample, result_response={'result':{'extraction':{'fields':{'total':'42'}},
+            'validation':{'verdict':'auto_approved','requires_human_review':False}}}, validation_errors=[], runtime_status='COMPLETED')
+        self.assertIsNone(metrics['validation_correct'])
+        self.assertEqual(metrics['validation_expectation_source'], 'unlabeled')
+        self.assertIsNone(metrics['extraction_confidence'])
+        self.assertIsNone(aggregate_metrics([metrics], elapsed_seconds=1)['extraction_confidence_mean'])
+
+    def test_weak_family_and_insufficient_latency_fail_even_when_mean_passes(self):
+        config = self._benchmark_config(min_field_f1=0.8, min_latency_sample_count=20)
+        aggregate = {'field_f1_mean':0.9, 'latency_sample_count':2,
+            'by_document_family':{'invoice':{'field_f1_mean':0.5}}}
+        gate = evaluate_quality_gate(config, aggregate, 0)
+        self.assertFalse(gate['passed'])
+        self.assertEqual(len(gate['failed_checks']), 2)
+    def test_representative_gate_fails_when_page_or_family_coverage_is_missing(self) -> None:
+        config = self._benchmark_config(
+            min_document_families=2, min_samples_per_family=2,
+            min_multi_page_samples=1, min_ocr_reference_count=1,
+            min_page_count_accuracy=1.0,
+        )
+        aggregate = aggregate_metrics([{
+            "document_family": "invoice", "expected_page_count": 1,
+            "page_count_match": False, "ocr_cer": None,
+        }])
+        gate = evaluate_quality_gate(config, aggregate, error_count=0)
+        self.assertFalse(gate["passed"])
+        self.assertTrue({"document_family_count", "multi_page_sample_count", "ocr_reference_count", "page_count_accuracy"}.issubset({check["metric"] for check in gate["failed_checks"]}))
+
     def test_normalize_amount_handles_cord_formats(self) -> None:
         self.assertEqual(normalize_amount("Rp 51.000"), "51000")
         self.assertEqual(normalize_amount("52,416"), "52416")

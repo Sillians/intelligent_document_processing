@@ -16,6 +16,8 @@ from pydantic import BaseModel, Field
 from shared.idp_common.config import get_settings
 from shared.idp_common.metrics import instrument_app
 from shared.idp_common.storage import download_json, upload_json
+from shared.idp_common.tenant_scope import artifact_key, require_artifact_scope
+from shared.idp_common.internal_auth import install_internal_auth
 
 settings = get_settings()
 _ROUTER_MAX_INFLIGHT = max(1, int(getattr(settings, "classifier_max_inflight_requests", 8)))
@@ -32,9 +34,11 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="classifier-router-service", lifespan=lifespan)
 instrument_app(app, "classifier-router-service")
+install_internal_auth(app)
 
 
 class RouteRequest(BaseModel):
+    tenant_id: str = Field(default="default", min_length=1, max_length=128)
     job_id: str = Field(min_length=1, max_length=128)
     ocr_key: str = Field(min_length=1, max_length=1024)
     layout_key: str | None = Field(default=None, max_length=1024)
@@ -283,6 +287,9 @@ def classify_document(
 
 
 def _route_sync(request: RouteRequest) -> dict[str, Any]:
+    require_artifact_scope(request.tenant_id, request.job_id, request.ocr_key)
+    if request.layout_key:
+        require_artifact_scope(request.tenant_id, request.job_id, request.layout_key)
     started = time.perf_counter()
     ocr = download_json(settings, settings.ocr_bucket, request.ocr_key)
     text, token_count, mean_ocr_confidence, fallback_used = _extract_ocr_text(ocr)
@@ -321,7 +328,7 @@ def _route_sync(request: RouteRequest) -> dict[str, Any]:
 
     classification_key = ""
     if bool(getattr(settings, "classifier_persist_decision", True)):
-        classification_key = f"jobs/{request.job_id}/classification/route.json"
+        classification_key = artifact_key(request.tenant_id, request.job_id, "classification/route.json")
         upload_json(settings, settings.layout_bucket, classification_key, payload)
 
     return {
@@ -336,6 +343,7 @@ def _route_sync(request: RouteRequest) -> dict[str, Any]:
         "classification_bucket": settings.layout_bucket if classification_key else "",
         "classification_key": classification_key,
         "matched_signal_count": len(payload["matched_signals"]),
+        "duration_ms": payload["duration_ms"],
     }
 
 

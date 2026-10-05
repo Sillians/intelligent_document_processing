@@ -31,6 +31,11 @@ class PromotionEvidenceTests(unittest.TestCase):
         sha = "a" * 40
         thresholds = {
             "min_sample_count": 20,
+            "min_document_families": 3,
+            "min_samples_per_family": 5,
+            "min_multi_page_samples": 5,
+            "min_ocr_reference_count": 15,
+            "min_page_count_accuracy": 1.0,
             "min_completion_rate": 0.95,
             "min_contract_pass_rate": 0.95,
             "min_route_accuracy": 0.85,

@@ -17,6 +17,8 @@ from evaluation_service.app.providers import build_provider
 from shared.idp_common.config import get_settings
 from shared.idp_common.metrics import instrument_app
 from shared.idp_common.storage import download_json, upload_json
+from shared.idp_common.tenant_scope import artifact_key
+from shared.idp_common.internal_auth import install_internal_auth
 
 settings = get_settings()
 logger = logging.getLogger("evaluation_service")
@@ -30,6 +32,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="evaluation-service", lifespan=lifespan)
 instrument_app(app, "evaluation-service")
+install_internal_auth(app)
 
 
 def _stable_json(value: Any) -> str:
@@ -116,12 +119,12 @@ def build_tags(request: EvaluationRequest, evaluation_id: str) -> dict[str, str]
     return tags
 
 
-def _receipt_key(job_id: str, evaluation_id: str) -> str:
-    return f"jobs/{job_id}/evaluation/{evaluation_id}/receipt.json"
+def _receipt_key(job_id: str, evaluation_id: str, tenant_id: str = "default") -> str:
+    return artifact_key(tenant_id, job_id, f"evaluation/{evaluation_id}/receipt.json")
 
 
-def _load_receipt(job_id: str, evaluation_id: str) -> dict[str, Any] | None:
-    key = _receipt_key(job_id, evaluation_id)
+def _load_receipt(job_id: str, evaluation_id: str, tenant_id: str = "default") -> dict[str, Any] | None:
+    key = _receipt_key(job_id, evaluation_id, tenant_id)
     for bucket in (settings.evaluation_bucket, settings.delivery_bucket):
         try:
             return download_json(settings, bucket, key)
@@ -131,7 +134,7 @@ def _load_receipt(job_id: str, evaluation_id: str) -> dict[str, Any] | None:
 
 
 def _persist_receipt(job_id: str, evaluation_id: str, receipt: dict[str, Any]) -> tuple[str, str]:
-    key = _receipt_key(job_id, evaluation_id)
+    key = _receipt_key(job_id, evaluation_id, receipt.get("tenant_id", "default"))
     bucket = settings.evaluation_bucket
     try:
         upload_json(settings, bucket, key, receipt)
@@ -195,7 +198,7 @@ async def health() -> dict[str, Any]:
 @app.post("/track-run")
 async def track_run(request: EvaluationRequest) -> dict[str, Any]:
     evaluation_id = _evaluation_id(request)
-    existing = await asyncio.to_thread(_load_receipt, request.job_id, evaluation_id)
+    existing = await asyncio.to_thread(_load_receipt, request.job_id, evaluation_id, request.tenant_id)
     if existing and existing.get("tracking_status") in {"success", "partial_success"}:
         return _response_from_receipt(existing, idempotent_replay=True)
 
@@ -239,6 +242,7 @@ async def track_run(request: EvaluationRequest) -> dict[str, Any]:
 
         receipt = {
             "job_id": request.job_id,
+            "tenant_id": request.tenant_id,
             "evaluation_id": evaluation_id,
             "tracking_status": tracking_status,
             "provider_results": provider_results,
@@ -261,8 +265,8 @@ async def track_run(request: EvaluationRequest) -> dict[str, Any]:
 
 
 @app.get("/evaluations/{job_id}/{evaluation_id}")
-async def get_evaluation(job_id: str, evaluation_id: str) -> dict[str, Any]:
-    receipt = await asyncio.to_thread(_load_receipt, job_id, evaluation_id)
+async def get_evaluation(job_id: str, evaluation_id: str, tenant_id: str = "default") -> dict[str, Any]:
+    receipt = await asyncio.to_thread(_load_receipt, job_id, evaluation_id, tenant_id)
     if receipt is None:
         raise HTTPException(status_code=404, detail="evaluation receipt not found")
     return receipt

@@ -176,6 +176,17 @@ python3 scripts/staging_operational_drill.py restore-verify \
 
 Apply retention only after a verified backup:
 
+As of 2026-10-01 the dry-run summary includes `held_jobs`. Active reprocessing
+parents/children and pending/leased deliveries are held against raw/derived
+cleanup. Dead-letter operations follow derived retention; operator audit follows
+audit retention. Expired delivery operations cascade their work/attempt cleanup.
+The apply operation takes exclusive maintenance locks while deleting objects and
+records; these block ingestion and queue reads as well as writes. Schedule a
+maintenance window, not normal load, and budget for object cleanup duration.
+These holds do not replace backups, retention SLA or a restore drill.
+PostgreSQL backups must include the resolution and delivery ledgers as well as
+ingestion and review tables. Run without `--apply` first; dry run is non-destructive.
+
 ```bash
 docker compose --env-file .env.production \
   -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.release.yml \

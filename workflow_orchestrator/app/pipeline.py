@@ -75,19 +75,25 @@ def build_preprocess_payload(start_payload: dict[str, Any]) -> dict[str, str]:
     }
 
 
-def build_ocr_payload(job_id: str, preprocess_result: dict[str, Any]) -> dict[str, str]:
+def build_ocr_payload(job_id: str, preprocess_result: dict[str, Any]) -> dict[str, Any]:
     preprocessed_key = required_str(preprocess_result, "preprocessed_key", stage="preprocess")
-    return {"job_id": job_id, "preprocessed_key": preprocessed_key}
+    payload = {"job_id": job_id, "preprocessed_key": preprocessed_key}
+    if "pages" in preprocess_result:
+        payload["preprocessed_pages"] = preprocess_result["pages"]
+    return payload
 
 
-def build_layout_payload(job_id: str, preprocess_result: dict[str, Any], ocr_result: dict[str, Any]) -> dict[str, str]:
+def build_layout_payload(job_id: str, preprocess_result: dict[str, Any], ocr_result: dict[str, Any]) -> dict[str, Any]:
     preprocessed_key = required_str(preprocess_result, "preprocessed_key", stage="preprocess")
     ocr_key = required_str(ocr_result, "ocr_key", stage="ocr")
-    return {
+    payload = {
         "job_id": job_id,
         "preprocessed_key": preprocessed_key,
         "ocr_key": ocr_key,
     }
+    if "pages" in preprocess_result:
+        payload["preprocessed_pages"] = preprocess_result["pages"]
+    return payload
 
 
 def build_classification_payload(job_id: str, ocr_result: dict[str, Any]) -> dict[str, str]:
@@ -143,13 +149,14 @@ def should_route_to_human_review(validation_result: dict[str, Any]) -> bool:
     return required_bool(validation_result, "requires_human_review", stage="validation")
 
 
-def build_review_payload(job_id: str, extraction_result: dict[str, Any], validation_result: dict[str, Any]) -> dict[str, Any]:
+def build_review_payload(job_id: str, extraction_result: dict[str, Any], validation_result: dict[str, Any], tenant_id: str = "default") -> dict[str, Any]:
     reasons = optional_list_of_str(validation_result, "reasons", stage="validation")
     fields = required_dict(extraction_result, "fields", stage="extraction")
     confidence = required_float(extraction_result, "confidence", stage="extraction")
 
     payload: dict[str, Any] = {
         "job_id": job_id,
+        "tenant_id": tenant_id,
         "reasons": reasons,
         "fields": fields,
         "confidence": confidence,

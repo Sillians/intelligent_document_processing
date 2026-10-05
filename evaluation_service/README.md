@@ -1,5 +1,18 @@
 # Evaluation Service
 
+## Representative Measurement Diagnostics (2026-10-03)
+The benchmark runner now produces per-document-family and annotated-field
+diagnostics, document-exact-match confidence bins/ECE, explicit-label-only
+validation accuracy and coverage checks for validation labels and latency samples.
+MLflow remains a metrics tracker, not a gold-label source or promotion authority.
+Detailed sensitive diagnostics remain in benchmark artifacts under access control;
+aggregate metrics may be exported through the existing evaluation adapter.
+Missing labels must remain null, not invented truth. Missing extraction confidence
+is excluded from the confidence mean, which stays null when none is observed.
+See `infra/quality/README.md`
+for corpus permissions, reviewed policy, annotation scope and benchmark commands.
+No representative real-document accuracy baseline is claimed by synthetic fixtures.
+
 ## Core Purpose
 Track production pipeline metrics, quality signals, and experiment lineage without allowing evaluation failures to block delivery or human-review outcomes.
 
@@ -354,3 +367,7 @@ Run focused workflow contract tests:
 ## Change Log
 - 2026-05-21: Documentation sync update to reflect current service naming and cross-service ingestion contract expectations.
 - 2026-06-04: Implemented modular MLflow and artifact-store providers, normalized and custom metrics, metric lineage, idempotency, provider fallback, durable receipts, lookup APIs, tests, and workflow integration.
+
+## 2026-09-30: Tenant Scope And Review Outcomes
+
+Workflow evaluation now carries `tenant_id` and records reviewed delivery, rejection, correction-validation failure, or review timeout as distinct statuses. Non-default tenant receipts use `tenants/<tenant_id>/jobs/<job_id>/evaluation/...`. Enable `IDP_REQUIRE_INTERNAL_AUTH` and configure `IDP_INTERNAL_API_KEY` in staging and production.

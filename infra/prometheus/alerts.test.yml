@@ -4,6 +4,33 @@ rule_files:
 evaluation_interval: 1m
 
 tests:
+  - name: delivery recovery
+    interval: 1m
+    input_series:
+      - series: 'idp_delivery_dead_letter_destinations'
+        values: "1x7"
+      - series: 'idp_delivery_oldest_unfinished_age_seconds'
+        values: "1000x7"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: IDPDeliveryDeadLetters
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              category: delivery
+            exp_annotations:
+              summary: "Delivery destinations require operator redrive"
+              description: "At least one destination exhausted its attempt budget. Inspect the tenant-scoped delivery queue, fix the destination, and redrive only failed work."
+      - eval_time: 6m
+        alertname: IDPDeliveryAgeHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              category: delivery
+            exp_annotations:
+              summary: "Unfinished delivery is older than 15 minutes"
+              description: "Delivery reconciliation has unfinished work older than 15 minutes. Check storage, destination health, expired leases, and dead letters before the workflow deadline."
+
   - name: service availability
     interval: 1m
     input_series:

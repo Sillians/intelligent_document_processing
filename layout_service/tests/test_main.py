@@ -1,16 +1,41 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
+
+import numpy as np
 
 from layout_service.app.main import (
     _assign_tokens_to_blocks,
     _bbox_from_value,
     _heuristic_blocks_from_tokens,
     _normalize_ocr_tokens,
+    _analyze_layout_sync,
+    LayoutRequest,
 )
 
 
 class LayoutServiceTests(unittest.TestCase):
+    @patch("layout_service.app.main.upload_json")
+    @patch("layout_service.app.main._detect_layout_blocks", return_value=([], "heuristic"))
+    @patch("layout_service.app.main._decode_image", return_value=np.zeros((100, 200, 3), dtype=np.uint8))
+    @patch("layout_service.app.main.download_json")
+    def test_layout_keeps_two_pages_and_unique_block_ids(self, load, _decode, _detect, uploaded) -> None:
+        load.return_value = {"token_count": 2, "pages": [
+            {"page_number": number, "preprocessed_key": f"jobs/j/preprocessed/page-{number:04d}.png", "tokens": [{"text": text, "confidence": 0.9, "bbox": [10, 10, 70, 25]}]}
+            for number, text in ((1, "Invoice"), (2, "Total"))
+        ]}
+        request = LayoutRequest(job_id="j", preprocessed_key="jobs/j/preprocessed/page-0001.png", ocr_key="jobs/j/ocr/ocr.json", preprocessed_pages=[
+            {"page_number": number, "preprocessed_key": f"jobs/j/preprocessed/page-{number:04d}.png"}
+            for number in (1, 2)
+        ])
+        response = _analyze_layout_sync(request)
+        artifact = uploaded.call_args.args[3]
+        self.assertEqual(response["page_count"], 2)
+        self.assertEqual([page["page_number"] for page in artifact["pages"]], [1, 2])
+        self.assertEqual([block["text"] for block in artifact["blocks"]], ["Invoice", "Total"])
+        self.assertEqual(len({block["id"] for block in artifact["blocks"]}), 2)
+
     def test_bbox_from_polygon(self) -> None:
         bbox = _bbox_from_value([[10, 20], [30, 20], [30, 40], [10, 40]])
         self.assertEqual(bbox, (10.0, 20.0, 30.0, 40.0))

@@ -1,5 +1,42 @@
 # Human Review Console
 
+## Page Failure Context (2026-10-03)
+Worker-authenticated `POST /review/ocr-exceptions` accepts an optional positive
+`page_number`. Exhausted independent OCR page retries persist the failing original
+document page alongside the typed code. This does not authorize a partial result
+or change operator resolution semantics. Whole-document failures may omit it.
+Page retry verification still completes an authenticated Label Studio decision
+and corrected revalidation before acknowledged delivery; see the verification README.
+
+## Operator Exception Inspection (2026-10-01)
+
+`GET /review/ocr-exceptions?tenant_id=...&limit=50&offset=0` now exposes the
+durable exception queue (maximum page size 200). Both list and single-record
+GET accept the privileged `REVIEW_DECISION_API_KEY` worker credential or a
+tenant-mapped `REVIEW_DECISION_API_KEYS` credential via `X-IDP-Review-Key`.
+Mapped credentials cannot inspect another tenant. Only the worker credential
+can record workflow OCR exceptions; listing does not grant mutation privileges.
+Database reads end their transactions before returning pooled connections.
+
+Operators normally use ingestion's `/exceptions` and `/exceptions/{job}/reprocess`
+with a separately mapped `X-IDP-Operator-Key`; ingestion fetches review records
+using its private worker credential. Original exception/decision records stay
+immutable; their resolution and linked replacement job live in ingestion's
+database table. A retry cannot turn a Label Studio rejection into approval.
+
+The existing authenticated Label Studio integration remains authoritative:
+re-fetch decisions, preserve corrected fields/reviewer identity, then resume
+Temporal polling and revalidate before delivery. The new live gate completes
+this path for two actual reprocessing generations and replays both histories:
+
+```bash
+bash scripts/run_recovery_delivery_verification.sh
+```
+
+See `infra/verification/README.md` and `artifacts/recovery-delivery/report.json`.
+Continue using the run commands below; this is an API layer, not a new dashboard.
+The fixture gate is not representative quality evidence or a production deploy.
+
 ## Core Purpose
 Create and persist human-in-the-loop review tasks for documents that fail validation gates or require analyst confirmation before delivery.
 
@@ -116,6 +153,22 @@ Example response with Label Studio:
 - `GET /health/provider` (verifies Label Studio authentication and project access)
 - `POST /review/tasks`
 - `GET /review/tasks/{job_id}/{review_task_id}`
+- `GET /review/tasks/{job_id}/{review_task_id}/decision?tenant_id=<tenant>` (Temporal worker polling; `X-IDP-Review-Key: REVIEW_DECISION_API_KEY`)
+- `POST /review/tasks/{job_id}/{review_task_id}/decision` (manual reviewer decision; tenant-specific `X-IDP-Review-Key`)
+
+## Completing A Review
+The Temporal workflow remains open while the decision API returns `pending`. Label Studio annotations are polled by the service; the first valid decision is stored immutably in PostgreSQL and mirrored to object storage. Approval merges corrected fields into the extraction result, runs validation again, and permits delivery only when the rules pass. Rejection and review timeout terminate without delivery.
+
+For a local-queue review, submit a decision with the reviewer key mapped to that task's tenant. This API is an integration layer, not a reviewer dashboard. The `reviewer_id` is client-supplied and should be bound to an identity provider before exposing manual decisions to untrusted reviewers.
+
+```bash
+curl -X POST http://localhost:8016/review/tasks/job-123/review-abc123/decision \
+  -H 'Content-Type: application/json' \
+  -H "X-IDP-Review-Key: ${REVIEWER_KEY}" \
+  -d '{"tenant_id":"default","reviewer_id":"analyst-1","decision":"approved","fields":{"invoice_number":"INV-42","total_amount":"42.00"}}'
+```
+
+`REVIEW_DECISION_API_KEYS` is a comma-separated list of `key:tenant` entries for manual reviewers. `REVIEW_DECISION_API_KEY` is a separate worker-only secret used to poll decisions; neither key should be the public ingestion API key. Set `IDP_REQUIRE_INTERNAL_AUTH=true` and a strong `IDP_INTERNAL_API_KEY` for internal task creation/read operations in staging and production. Keep all keys in deployment secrets, not in Git.
 
 ## Key Configuration
 - `REVIEW_BUCKET`
@@ -126,6 +179,12 @@ Example response with Label Studio:
 - `REVIEW_HIGH_PRIORITY_CONFIDENCE_THRESHOLD`
 - `REVIEW_FALLBACK_TO_LOCAL_QUEUE`
 - `REVIEW_PERSIST_TASKS`
+- `REVIEW_DECISION_API_KEY`
+- `REVIEW_DECISION_API_KEYS`
+- `REVIEW_POLL_INTERVAL_SECONDS`
+- `REVIEW_WAIT_TIMEOUT_SECONDS`
+- `IDP_REQUIRE_INTERNAL_AUTH`
+- `IDP_INTERNAL_API_KEY`
 - `LABEL_STUDIO_URL`
 - `LABEL_STUDIO_TOKEN`
 - `LABEL_STUDIO_PROJECT_ID`
@@ -228,6 +287,9 @@ Human review API docs:    http://localhost:8016/docs
 ```
 
 Label Studio is the reviewer-facing UI. `human-review-console` remains the API and integration layer responsible for task creation, idempotency, priority, persistence, and provider fallback.
+
+For review-to-delivery, configure the Label Studio project with a Choices control named `decision` containing `Approve` and `Reject`. Add a TextArea control named `corrected_fields_json` for a JSON object of corrected fields, for example `{"invoice_number":"INV-42","total_amount":"42.00"}`. An annotation without an explicit recognized decision remains pending; an approval without corrected fields also remains pending. A rejected annotation terminates the workflow without delivery. The project must retain the imported `job_id`, `tenant_id`, and `review_task_id` task data so the decision can be matched to the original job.
+The Label Studio import response must include a task ID. An import without one is treated as a provider error rather than a queued review that could never be polled.
 
 ### Verify Label Studio Integration
 
@@ -381,3 +443,92 @@ Run the focused workflow contract tests:
   legacy-token enablement for the bootstrapped `LABEL_STUDIO_USER_TOKEN`.
 - 2026-06-04: Added first-user Label Studio bootstrap configuration using username, password, and the existing integration access token.
 - 2026-06-04: Documented project-name versus numeric project-ID behavior, project-ID lookup, service access points, and end-to-end Label Studio integration verification.
+
+## 2026-09-30: Complete Reviews And Resume Delivery
+
+Creating a review task no longer finishes the Temporal workflow. It remains in `PENDING_HUMAN_REVIEW`, with a readable interim result, until this service records a decision. The worker polls `GET /review/tasks/{job_id}/{review_task_id}/decision?tenant_id=...` using `REVIEW_DECISION_API_KEY` in `X-IDP-Review-Key`. The default poll interval is 60 seconds and the default wait is seven days; set `INGESTION_WORKFLOW_TIMEOUT_MINUTES` at least one hour longer.
+
+For Label Studio tasks, the poll endpoint reads the configured project's task and latest completed annotation. Configure the Label Studio project with a single-choice `decision` control whose values are `Approve` or `Reject`, plus a `corrected_fields_json` TextArea. The text area should contain a JSON object of corrected fields, for example `{"invoice_number":"INV-42","total_amount":"42.00"}`. Individual TextArea controls named after field keys also work. A submitted approval without corrected fields remains pending; the reviewer must provide at least one corrected field. Corrected fields override the machine values, and validation checks required fields and formats before delivery. Rejection does not deliver.
+
+Local queue decisions can be submitted by a trusted reviewer client. Configure `REVIEW_DECISION_API_KEYS` as comma-separated `key:tenant-id` entries, one tenant-scoped review credential per ingestion tenant. Keep this separate from `REVIEW_DECISION_API_KEY`, which authorizes the Temporal worker's decision polling. Example for a local default-tenant review:
+
+```bash
+curl -X POST http://localhost:8016/review/tasks/<job_id>/<review_task_id>/decision \
+  -H "X-IDP-Review-Key: <default-tenant-review-key>" \
+  -H "Content-Type: application/json" \
+  -d '{"tenant_id":"default","reviewer_id":"reviewer-1","decision":"approved","fields":{"invoice_number":"INV-42","invoice_date":"2026-09-30","total_amount":"42.00"}}'
+```
+
+`decision` can also be `rejected`, with an empty `fields` object. Identical submissions are idempotent; a conflicting second decision returns HTTP 409. Review decisions are stored in Postgres with a unique `(tenant_id, job_id, review_task_id)` key and mirrored to `REVIEW_BUCKET` for audit. If the object store mirror fails, the Postgres decision remains authoritative. The reviewer key is accepted only for its configured tenant; the task's stored tenant and Label Studio task identity are checked before any decision is returned.
+
+In staging/production, configure `IDP_REQUIRE_INTERNAL_AUTH=true`, a strong `IDP_INTERNAL_API_KEY`, strong `REVIEW_DECISION_API_KEY`, and `REVIEW_DECISION_API_KEYS` covering every tenant. Update the GitHub `STAGING_ENV_FILE` secret before deploying this release. The staging Compose overlay does not expose the review API on a host port; use a trusted internal client or a protected operator tunnel for manual decisions. No Label Studio webhook configuration is needed because the worker polls task annotations.
+
+### Authenticated Label Studio event hint
+
+`POST /review/tasks/{job_id}/{review_task_id}/label-studio-event?tenant_id=...`
+requires `X-IDP-Review-Key` mapped to that tenant in `REVIEW_DECISION_API_KEYS`.
+The endpoint ignores submitted annotation fields and re-fetches the registered
+external task with the service's Label Studio credential. Project, tenant, job,
+and task identities must match before persisting a decision. Configure this
+per-task URL in a trusted integration adapter; this is not a project-wide webhook
+payload dispatcher. `REVIEW_DECISION_API_KEY` must also be configured for the
+existing authoritative lookup path. Keep the endpoint behind encrypted transport.
+
+Missing reviewer identity leaves the task pending; `completed_by` may be a scalar
+ID or an object containing `id`. No synthetic reviewer identity is supplied.
+Existing immutable decision persistence makes repeat notifications return the
+stored decision. Temporal observes it through its existing polling loop, not an
+immediate signal. Annotation edits after a committed decision do not revise it.
+
+Focused tests cover tenant-key denial, authoritative lookup rather than trusting
+event fields, and missing/nested reviewer identities. The live drill below verifies
+decision integration, persisted task replay and Temporal history replay.
+Project-wide webhook registration and concurrent provider-import reconciliation
+remain separate from this per-task integration.
+
+### Durable OCR exceptions
+
+`POST /review/ocr-exceptions` accepts tenant, job, and typed `failure_code` using
+`X-IDP-Review-Key` with the worker credential. Records use the authoritative
+Postgres `review_decisions` table under reserved task ID `ocr-exception`; database
+uniqueness preserves the first exception across retries and restarts. Retrieve
+with `GET /review/ocr-exceptions/{job_id}?tenant_id=...` using that tenant's review
+key. This is an exception lookup API; an operator resolution/requeue UI remains
+future work. Provision the worker key before enabling this path.
+
+Live persistence verification was performed against an isolated Postgres 16
+container (`idp-verification-postgres`, host port 15439). Both corrected decisions
+and exception records survived a database restart, duplicate writes preserved
+the first result, and cross-tenant lookups returned no record. This exercises
+committed database restart recovery; it does not simulate a crash during commit.
+Run `python -m scripts.verify_review_persistence` with the target test database
+settings. The script writes only tenant `verification`, job `recovery-test`.
+
+### Completed live decision and recovery checks
+
+The live verification profile (`infra/verification/README.md`) now exercises this
+service against Label Studio 1.20.0 and real Postgres. Approved corrected fields
+were revalidated and delivered with the Label Studio reviewer ID after a worker
+SIGKILL/restart. Rejection, invalid corrections and timeout produced no delivery.
+Duplicate event calls returned the committed decision; duplicate task creation
+reused its persisted external task reference. Imports now explicitly request
+`return_task_ids=true`. The fast retry path requires the persisted task record;
+concurrent imports or a crash before that record commits still require provider
+creation reconciliation before claiming exactly-once task creation.
+
+## 2026-10-01: Tenant Boundary Verification
+
+This service's processing endpoint is included in the live intake/authorization
+acceptance gate. A call without its internal service credential returns `401`;
+authorized calls referring to another tenant/job's artifacts return `403` before
+processing those objects. Review uses its dedicated tenant/worker credentials
+for decisions and also rejects an operator key bound to another tenant.
+
+Run `bash scripts/run_ingestion_verification.sh` from the repository root. Inspect
+`artifacts/ingestion-recovery/tenant-boundaries.json`. The profile is isolated,
+uses local fixture credentials, and leaves its services running after the test.
+Keep processing APIs private: a shared internal key authenticates a trusted
+service, not an end-user tenant principal. Public tenant access is mediated by
+ingestion. See `infra/architecture/IMPLEMENTATION_ORDER.md` for the next exception,
+delivery, page-execution, and representative-quality milestones; this gate does
+not mark those implementations complete.

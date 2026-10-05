@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from workflow_orchestrator.app.activities import (
-    _build_ocr_fallback_response,
     _is_non_retryable_status,
-    _is_ocr_fallback_error,
+    ocr_activity,
 )
 
 
@@ -24,18 +24,14 @@ class ActivityHttpClassificationTests(unittest.TestCase):
         self.assertFalse(_is_non_retryable_status(500))
         self.assertFalse(_is_non_retryable_status(503))
 
-    def test_ocr_fallback_error_detection(self) -> None:
-        self.assertTrue(_is_ocr_fallback_error("ocr: network error calling http://ocr-service:8011/ocr"))
-        self.assertTrue(_is_ocr_fallback_error("ocr: downstream HTTP 503 from x"))
-        self.assertFalse(_is_ocr_fallback_error("ocr: downstream HTTP 400 from x"))
-
-    @patch("workflow_orchestrator.app.activities.upload_json")
-    def test_build_ocr_fallback_response_persists_payload(self, mocked_upload_json) -> None:
-        result = _build_ocr_fallback_response("job-123", "downstream_unavailable")
-        self.assertEqual(result["job_id"], "job-123")
-        self.assertEqual(result["token_count"], 1)
-        self.assertTrue(result["fallback_used"])
-        mocked_upload_json.assert_called_once()
+    @patch("workflow_orchestrator.app.activities._post", new_callable=AsyncMock)
+    def test_ocr_network_error_propagates_for_temporal_retry(self, mocked_post: AsyncMock) -> None:
+        mocked_post.side_effect = RuntimeError("OCR unavailable")
+        from temporalio.exceptions import ApplicationError
+        with self.assertRaises(ApplicationError) as raised:
+            asyncio.run(ocr_activity({"job_id": "job-123"}))
+        self.assertEqual(raised.exception.type, "OCR_UNAVAILABLE")
+        self.assertFalse(raised.exception.non_retryable)
 
 
 if __name__ == "__main__":

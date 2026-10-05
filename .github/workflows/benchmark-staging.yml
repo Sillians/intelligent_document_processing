@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       limit:
-        description: Number of CORD-v2 validation samples
+        description: Number of labeled representative manifest samples
         required: true
         default: "20"
         type: string
@@ -29,6 +29,9 @@ jobs:
     environment: staging
 
     steps:
+      - name: Initialize benchmark evidence
+        run: mkdir -p "artifacts/staging/benchmarks/${GITHUB_RUN_ID}"
+
       - name: Resolve deployed staging SHA
         env:
           STAGING_APP_DIR_OVERRIDE: ${{ vars.STAGING_APP_DIR }}
@@ -78,7 +81,7 @@ jobs:
           STAGING_TENANT_ID: ${{ vars.STAGING_TENANT_ID || 'default' }}
           BENCHMARK_LIMIT: ${{ inputs.limit }}
           BENCHMARK_CONCURRENCY: ${{ inputs.concurrency }}
-          HF_HOME: ${{ runner.temp }}/huggingface
+          STAGING_BENCHMARK_MANIFEST: ${{ vars.STAGING_BENCHMARK_MANIFEST }}
         run: |
           set -euo pipefail
           if [ -z "${STAGING_PUBLIC_BASE_URL}" ] || [ -z "${STAGING_SMOKE_API_KEY}" ]; then
@@ -93,11 +96,20 @@ jobs:
             echo "concurrency must be an integer from 1 through 8." >&2
             exit 1
           fi
+          if [ -z "${STAGING_BENCHMARK_MANIFEST}" ] || [ ! -r "${STAGING_BENCHMARK_MANIFEST}" ]; then
+            echo "Set staging variable STAGING_BENCHMARK_MANIFEST to a readable absolute JSONL manifest on the runner." >&2
+            exit 1
+          fi
           artifact_dir="artifacts/staging/benchmarks/${GITHUB_RUN_ID}"
+          python3 scripts/validate_benchmark_manifest.py \
+            --manifest "${STAGING_BENCHMARK_MANIFEST}" \
+            --policy infra/staging/release_acceptance.json \
+            --limit "${BENCHMARK_LIMIT}" \
+            --output "${artifact_dir}/manifest_preflight.json"
           INGESTION_API_KEY="${STAGING_SMOKE_API_KEY}" \
           TENANT_ID="${STAGING_TENANT_ID}" \
           "${RUNNER_TEMP}/idp-benchmark-venv/bin/python" scripts/run_dataset_benchmark.py \
-            --dataset cord-v2 \
+            --manifest "${STAGING_BENCHMARK_MANIFEST}" \
             --split validation \
             --limit "${BENCHMARK_LIMIT}" \
             --concurrency "${BENCHMARK_CONCURRENCY}" \
@@ -106,6 +118,17 @@ jobs:
             --thresholds-file infra/staging/release_acceptance.json \
             --no-track-evaluation \
             --artifact-dir "${artifact_dir}"
+
+      - name: Assess service boundaries
+        if: always()
+        run: |
+          set -euo pipefail
+          artifact_dir="artifacts/staging/benchmarks/${GITHUB_RUN_ID}"
+          if [ -f "${artifact_dir}/summary.json" ]; then
+            python3 scripts/assess_service_boundaries.py \
+              --summary "${artifact_dir}/summary.json" \
+              --output "${artifact_dir}/boundary_report.json"
+          fi
 
       - name: Publish benchmark summary
         if: always()
@@ -126,6 +149,4 @@ jobs:
         with:
           name: staging-benchmark-${{ github.run_id }}
           path: artifacts/staging/benchmarks/${{ github.run_id }}
-          if-no-files-found: error
-
-
+          if-no-files-found: warn

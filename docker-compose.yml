@@ -273,6 +273,8 @@ services:
     command: uvicorn human_review_console.app.main:app --host 0.0.0.0 --port 8016
     env_file: ${IDP_ENV_FILE:-.env}
     depends_on:
+      postgres:
+        condition: service_healthy
       label-studio:
         condition: service_started
     ports:
@@ -294,10 +296,12 @@ services:
     command: uvicorn delivery_service.app.main:app --host 0.0.0.0 --port 8017
     env_file: ${IDP_ENV_FILE:-.env}
     depends_on:
+      postgres:
+        condition: service_healthy
       validation-service:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8017/health')\""]
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8017/ready')\""]
       interval: 20s
       timeout: 5s
       retries: 10

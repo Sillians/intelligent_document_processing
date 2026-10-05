@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import unittest
+from io import BytesIO
+from unittest.mock import patch
 
 import cv2
 import numpy as np
+from PIL import Image
 
-from preprocess_worker.app.main import _ensure_odd, _estimate_skew_angle, _normalize_to_bgr, preprocess_image
+from preprocess_worker.app.main import PreprocessRequest, _decode_pages, _ensure_odd, _estimate_skew_angle, _normalize_to_bgr, _preprocess_sync, preprocess_image, settings
 
 HAS_FULL_OPENCV = all(
     hasattr(cv2, name)
@@ -21,6 +24,65 @@ HAS_FULL_OPENCV = all(
 
 
 class PreprocessWorkerTests(unittest.TestCase):
+    @patch('preprocess_worker.app.main.upload_json')
+    @patch('preprocess_worker.app.main.upload_bytes')
+    @patch('preprocess_worker.app.main.download_bytes')
+    def test_pdf_text_layer_reference_is_separate_from_rendered_pixels(self, download, upload, native_upload):
+        output = BytesIO()
+        Image.new('RGB', (72, 72), 'white').save(output, format='PDF')
+        download.return_value = output.getvalue()
+        request = PreprocessRequest(job_id='job-1', raw_bucket=settings.raw_bucket, raw_key='jobs/job-1/raw/source.pdf')
+        result = _preprocess_sync(request)
+        self.assertEqual(result['page_count'], 1)
+        self.assertEqual(result['pages'][0]['native_text_key'], 'jobs/job-1/preprocessed/native-0001.json')
+        self.assertNotIn('native_text', result['pages'][0])
+        self.assertEqual(native_upload.call_args.args[3]['coordinate_space'], 'pdf-points')
+        self.assertFalse(native_upload.call_args.args[3]['truncated'])
+
+    def test_total_pixel_budget_rejects_document_before_remaining_decodes(self):
+        from fastapi import HTTPException
+        output = BytesIO()
+        Image.new('RGB', (20, 10)).save(output, format='TIFF', save_all=True,
+                                      append_images=[Image.new('RGB', (20, 10))])
+        with patch.object(settings, 'preprocess_max_total_pixels', 300), self.assertRaises(HTTPException):
+            _decode_pages(output.getvalue())
+    @patch("preprocess_worker.app.main.upload_bytes")
+    @patch("preprocess_worker.app.main.download_bytes")
+    def test_preprocess_persists_each_tiff_page(self, download, upload) -> None:
+        output = BytesIO()
+        Image.new("RGB", (20, 10), "white").save(output, format="TIFF", save_all=True, append_images=[Image.new("RGB", (30, 15), "white")])
+        download.return_value = output.getvalue()
+        request = PreprocessRequest(job_id="job-1", raw_bucket=settings.raw_bucket, raw_key="jobs/job-1/raw/source.tiff")
+        with patch.object(settings, "preprocess_max_pages", 2):
+            result = _preprocess_sync(request)
+        self.assertEqual(result["page_count"], 2)
+        self.assertEqual([page["page_number"] for page in result["pages"]], [1, 2])
+        self.assertEqual(upload.call_count, 2)
+        self.assertEqual([call.args[2].split("/")[-1] for call in upload.call_args_list], ["page-0001.png", "page-0002.png"])
+
+    def test_multipage_tiff_decodes_every_page_in_order(self) -> None:
+        output = BytesIO()
+        Image.new("RGB", (20, 10), "red").save(output, format="TIFF", save_all=True, append_images=[Image.new("RGB", (30, 15), "blue")])
+        with patch.object(settings, "preprocess_max_pages", 2):
+            pages = _decode_pages(output.getvalue())
+        self.assertEqual([page.shape[:2] for page in pages], [(10, 20), (15, 30)])
+
+    def test_page_cap_rejects_multipage_tiff(self) -> None:
+        from fastapi import HTTPException
+        output = BytesIO()
+        Image.new("RGB", (20, 10), "red").save(output, format="TIFF", save_all=True, append_images=[Image.new("RGB", (30, 15), "blue")])
+        with patch.object(settings, "preprocess_max_pages", 1), self.assertRaises(HTTPException) as raised:
+            _decode_pages(output.getvalue())
+        self.assertEqual(raised.exception.status_code, 422)
+
+    def test_multipage_pdf_renders_every_page(self) -> None:
+        output = BytesIO()
+        Image.new("RGB", (72, 72), "white").save(output, format="PDF", save_all=True, append_images=[Image.new("RGB", (100, 72), "white")])
+        with patch.object(settings, "preprocess_max_pages", 2), patch.object(settings, "preprocess_pdf_dpi", 72):
+            pages = _decode_pages(output.getvalue())
+        self.assertEqual(len(pages), 2)
+        self.assertNotEqual(pages[0].shape[1], pages[1].shape[1])
+
     def test_ensure_odd_enforces_odd_and_minimum(self) -> None:
         self.assertEqual(_ensure_odd(2), 3)
         self.assertEqual(_ensure_odd(10), 11)

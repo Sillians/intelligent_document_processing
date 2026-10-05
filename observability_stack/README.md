@@ -1,5 +1,37 @@
 # Observability Stack
 
+## Durable Delivery Signals (2026-10-01)
+
+Delivery reconciliation now exports these service gauges on `/metrics`:
+
+| Metric | Meaning |
+| --- | --- |
+| `idp_delivery_pending_destinations` | Pending/leased destination work, including receipt projection. |
+| `idp_delivery_dead_letter_destinations` | Destinations requiring authenticated operator redrive. |
+| `idp_delivery_oldest_unfinished_age_seconds` | Oldest unfinished operation age, including dead letters. |
+
+`infra/prometheus/alerts.yml` adds `IDPDeliveryDeadLetters` (>0 for 2 minutes,
+critical) and `IDPDeliveryAgeHigh` (>900 seconds for 5 minutes, warning). Rules
+use the existing Alertmanager routing; email still requires configured SMTP.
+Check destination/storage health, inspect the tenant-scoped `/delivery-queue`,
+repair the cause, then redrive only failed work. A queued response or dead-letter
+alert never proves delivery completion; verify the acknowledged ledger receipt.
+
+Validate rules from the repository root:
+
+```bash
+docker --context idp-staging run --rm \
+  -v "$PWD/infra/prometheus:/etc/prometheus:ro" --entrypoint promtool \
+  prom/prometheus:v2.55.1 test rules /etc/prometheus/alerts.test.yml
+```
+
+The rule suite passes, and the live recovery/delivery drill verifies the service
+exports its gauges after restarting and draining committed work. This does not
+claim live Alertmanager notification delivery or a deployed Prometheus reload.
+Roll out/reload the rule files through the normal observability deployment and
+verify staging targets before relying on alerts. The isolated verification
+profile intentionally does not include Grafana/Alertmanager.
+
 ## Core Purpose
 Monitor the Intelligent Document Processing platform with Prometheus metrics, Grafana dashboards, and Prometheus alert rules.
 

@@ -9,15 +9,19 @@ from temporalio.client import Client
 from temporalio.worker import Worker
 
 from shared.idp_common.config import get_settings
+from workflow_orchestrator.app.page_execution import ocr_page_activity, layout_page_activity, aggregate_pages_activity
 from workflow_orchestrator.app.activities import (
     classify_activity,
     create_review_task_activity,
     deliver_activity,
+    poll_delivery_activity,
     evaluate_activity,
     extract_activity,
     layout_activity,
     notify_webhook_activity,
     ocr_activity,
+    poll_review_activity,
+    record_ocr_exception_activity,
     preprocess_activity,
     validate_activity,
 )
@@ -59,6 +63,9 @@ async def main() -> None:
         task_queue=settings.temporal_task_queue,
         workflows=[DocumentPipelineWorkflow],
         activities=[
+            ocr_page_activity,
+            layout_page_activity,
+            aggregate_pages_activity,
             preprocess_activity,
             ocr_activity,
             layout_activity,
@@ -66,7 +73,10 @@ async def main() -> None:
             extract_activity,
             validate_activity,
             create_review_task_activity,
+            poll_review_activity,
+            record_ocr_exception_activity,
             deliver_activity,
+            poll_delivery_activity,
             evaluate_activity,
             notify_webhook_activity,
         ],

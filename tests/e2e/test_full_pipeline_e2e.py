@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
-from scripts.full_pipeline_e2e import validate_pipeline_result
+from scripts.full_pipeline_e2e import poll_until_complete, validate_pipeline_result
 
 
 def base_result(final_status: str = "delivered") -> dict:
@@ -47,12 +49,26 @@ def base_result(final_status: str = "delivered") -> dict:
 
 
 class FullPipelineE2EValidationTests(unittest.TestCase):
+    @patch("scripts.full_pipeline_e2e.get_status", return_value={"workflow_status": "PENDING_HUMAN_REVIEW"})
+    def test_smoke_returns_pending_review_snapshot_without_waiting_for_final_delivery(self, _get_status) -> None:
+        status, history = poll_until_complete(SimpleNamespace(timeout_seconds=2, poll_interval_seconds=0), "job-1")
+        self.assertEqual(status["workflow_status"], "PENDING_HUMAN_REVIEW")
+        self.assertEqual(len(history), 1)
+
     def test_delivered_result_passes_contract(self) -> None:
         summary, errors = validate_pipeline_result(base_result(), strict_required_fields=False)
 
         self.assertEqual(errors, [])
         self.assertEqual(summary["workflow_final_status"], "delivered")
         self.assertEqual(summary["branch"], "delivery")
+
+    def test_page_count_mismatch_fails_contract(self) -> None:
+        payload = base_result()
+        payload["result"]["preprocess"]["page_count"] = 2
+        payload["result"]["ocr"]["page_count"] = 1
+        payload["result"]["layout"]["page_count"] = 2
+        _, errors = validate_pipeline_result(payload, strict_required_fields=False)
+        self.assertIn("page_count_mismatch", errors)
 
     def test_pending_review_result_passes_contract_with_missing_invoice_fields(self) -> None:
         payload = base_result(final_status="pending_human_review")
@@ -64,6 +80,12 @@ class FullPipelineE2EValidationTests(unittest.TestCase):
         self.assertEqual(summary["workflow_final_status"], "pending_human_review")
         self.assertEqual(summary["branch"], "review")
         self.assertEqual(summary["missing_required_fields"], ["total_amount"])
+
+    def test_rejected_or_timed_out_review_does_not_pass_smoke(self) -> None:
+        for status in ("rejected", "review_validation_failed", "review_timed_out"):
+            with self.subTest(status=status):
+                _, errors = validate_pipeline_result(base_result(final_status=status), strict_required_fields=False)
+                self.assertIn(f"unexpected_final_status:{status}", errors)
 
     def test_strict_required_fields_fails_missing_fields_even_on_review_branch(self) -> None:
         payload = base_result(final_status="pending_human_review")

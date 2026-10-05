@@ -22,6 +22,7 @@ from urllib import error, parse, request
 
 
 COMPLETED_STATUS = "COMPLETED"
+REVIEW_PENDING_STATUS = "PENDING_HUMAN_REVIEW"
 FAILED_STATUSES = {"FAILED", "TERMINATED", "CANCELED", "TIMED_OUT"}
 VALID_FINAL_STATUSES = {"delivered", "pending_human_review"}
 REQUIRED_STAGES = ("preprocess", "ocr", "layout", "classification", "extraction", "validation")
@@ -217,7 +218,7 @@ def poll_until_complete(config: RunnerConfig, job_id: str) -> tuple[dict[str, An
         )
         print(f"workflow status: {status}", flush=True)
 
-        if status == COMPLETED_STATUS:
+        if status in {COMPLETED_STATUS, REVIEW_PENDING_STATUS}:
             return last_status, history
         if status in FAILED_STATUSES:
             return last_status, history
@@ -270,6 +271,10 @@ def validate_pipeline_result(payload: dict[str, Any], *, strict_required_fields:
     require_non_empty(ocr, "ocr_key", "ocr", errors)
     require_number(ocr, "mean_confidence", "ocr", errors)
     require_non_empty(layout, "layout_key", "layout", errors)
+    page_counts = [stage.get("page_count") for stage in (preprocess, ocr, layout)]
+    if any(value is not None for value in page_counts):
+        if any(type(value) is not int or value < 1 for value in page_counts) or len(set(page_counts)) != 1:
+            errors.append("page_count_mismatch")
     require_non_empty(classification, "route", "classification", errors)
     require_non_empty(extraction, "extraction_key", "extraction", errors)
     require_number(extraction, "confidence", "extraction", errors)
@@ -315,7 +320,7 @@ def validate_pipeline_result(payload: dict[str, Any], *, strict_required_fields:
         "requires_review": validation.get("requires_human_review"),
         "validation_verdict": validation.get("verdict"),
         "missing_required_fields": missing_required_fields,
-        "branch": "review" if final_status == "pending_human_review" else "delivery",
+        "branch": "delivery" if final_status == "delivered" else "review",
     }
     if isinstance(result.get("delivery"), dict):
         summary["delivery_id"] = result["delivery"].get("delivery_id")
@@ -397,7 +402,7 @@ def run(config: RunnerConfig) -> dict[str, Any]:
         write_json(config.artifact_dir / "status_history.json", status_history)
         write_json(config.artifact_dir / "final_status.json", final_status)
         status = str(final_status.get("workflow_status") or final_status.get("status") or "UNKNOWN")
-        if status != COMPLETED_STATUS:
+        if status not in {COMPLETED_STATUS, REVIEW_PENDING_STATUS}:
             raise E2EError(
                 f"workflow ended unsuccessfully: {status}"
                 if status in FAILED_STATUSES

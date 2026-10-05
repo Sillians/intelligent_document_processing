@@ -5,6 +5,7 @@ import hashlib
 import logging
 import mimetypes
 import re
+import time
 import uuid
 from contextlib import asynccontextmanager
 from datetime import timedelta
@@ -16,6 +17,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from prometheus_client import Counter, Histogram
 from temporalio.client import Client
+from temporalio.common import WorkflowIDReusePolicy
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
 from ingestion_service.app.auth import Principal, resolve_principal
@@ -24,7 +26,10 @@ from ingestion_service.app.schemas import AuditEventResponse, DocumentStatusResp
 from shared.idp_common.config import Settings, get_settings
 from shared.idp_common.metrics import instrument_app
 from shared.idp_common.storage import ensure_bucket, upload_bytes
+from shared.idp_common.storage import object_exists, verify_artifact
+from shared.idp_common.tenant_scope import artifact_key
 from workflow_orchestrator.app.workflows import DocumentPipelineWorkflow
+from ingestion_service.app.reprocessing import install_reprocessing, persist_reprocess_artifact, reconcile_reprocess_results
 
 logger = logging.getLogger("ingestion_service")
 
@@ -76,12 +81,16 @@ async def lifespan(app: FastAPI):
     app.state.temporal_client = None
     app.state.temporal_lock = asyncio.Lock()
 
-    ensure_bucket(settings, settings.raw_bucket)
-    logger.info("ingestion_service started")
-
+    reconcile_task = None
     try:
+        await asyncio.to_thread(ensure_bucket, settings, settings.raw_bucket)
+        reconcile_task = asyncio.create_task(_dispatch_reconciler(app), name="ingestion-dispatch-reconciler")
+        logger.info("ingestion_service started")
         yield
     finally:
+        if reconcile_task is not None:
+            reconcile_task.cancel()
+            await asyncio.gather(reconcile_task, return_exceptions=True)
         repository: IngestionRepository = app.state.repository
         repository.close()
         logger.info("ingestion_service stopped")
@@ -119,6 +128,98 @@ async def get_temporal_client(settings: Settings) -> Client:
             )
 
     return app.state.temporal_client
+
+
+async def _dispatch_claimed(repository: IngestionRepository, settings: Settings, dispatch: dict[str, Any]) -> bool:
+    job_id = dispatch["job_id"]
+    tenant_id = dispatch["tenant_id"]
+    workflow_id = f"idp-{tenant_id}-{job_id}"
+    start_payload = {
+        "job_id": job_id,
+        "tenant_id": tenant_id,
+        "raw_bucket": dispatch["raw_bucket"],
+        "raw_key": dispatch["raw_key"],
+        "review_poll_interval_seconds": settings.review_poll_interval_seconds,
+        "review_wait_timeout_seconds": settings.review_wait_timeout_seconds,
+        "preprocess_timeout_seconds": settings.preprocess_request_timeout_seconds * settings.preprocess_max_pages + 90,
+        "ocr_timeout_seconds_per_page": settings.ocr_request_timeout_seconds,
+        "layout_timeout_seconds_per_page": settings.layout_request_timeout_seconds,
+        "delivery_wait_timeout_seconds": settings.delivery_wait_timeout_seconds,
+        "delivery_poll_interval_seconds": settings.delivery_poll_interval_seconds,
+        "reprocess_parent_job_id": (dispatch.get("metadata") or {}).get("reprocess_parent_job_id"),
+        "reprocess_generation": (dispatch.get("metadata") or {}).get("reprocess_generation"),
+    }
+    try:
+        temporal_client = await get_temporal_client(settings)
+        try:
+            handle = await temporal_client.start_workflow(
+                DocumentPipelineWorkflow.run,
+                start_payload,
+                id=workflow_id,
+                task_queue=settings.temporal_task_queue,
+                execution_timeout=timedelta(minutes=settings.ingestion_workflow_timeout_minutes),
+                id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
+            )
+            run_id = getattr(handle, "first_execution_run_id", None)
+        except WorkflowAlreadyStartedError as exc:
+            run_id = exc.run_id
+        await asyncio.to_thread(repository.mark_queued, job_id, workflow_id, run_id, dispatch["lease_token"])
+        INGESTION_QUEUE_PUBLISH.labels("success").inc()
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("workflow dispatch deferred job_id=%s error=%s", job_id, exc)
+        INGESTION_QUEUE_PUBLISH.labels("deferred").inc()
+        await asyncio.to_thread(repository.release_dispatch, job_id, str(exc), dispatch["lease_token"])
+        return False
+
+
+async def _reconcile_uploads(repository: IngestionRepository, settings: Settings) -> None:
+    incomplete = await asyncio.to_thread(repository.list_incomplete_uploads)
+    for job in incomplete:
+        key = artifact_key(job["tenant_id"], job["job_id"], f"raw/{job['original_filename']}")
+        exists = await asyncio.to_thread(object_exists, settings, settings.raw_bucket, key)
+        if not exists:
+            if (job.get("metadata") or {}).get("reprocess_source"):
+                try:
+                    await persist_reprocess_artifact(job, settings)
+                except ValueError as exc:
+                    await asyncio.to_thread(repository.mark_failed, job["job_id"], "REPROCESS_SOURCE_INVALID", str(exc))
+                    continue
+                exists = True
+        if not exists:
+            if float(job["age_seconds"]) > 900:
+                await asyncio.to_thread(repository.mark_failed, job["job_id"], "RAW_UPLOAD_INCOMPLETE", "Raw artifact not found after upload interruption")
+            continue
+        try:
+            await asyncio.to_thread(verify_artifact, settings, settings.raw_bucket, key, job["sha256"], job["size_bytes"])
+        except ValueError as exc:
+            await asyncio.to_thread(repository.mark_failed, job["job_id"], "RAW_ARTIFACT_CORRUPT", str(exc))
+            continue
+        await asyncio.to_thread(repository.update_artifact, job["job_id"], settings.raw_bucket, key, f"s3://{settings.raw_bucket}/{key}")
+        logger.info("recovered interrupted raw upload job_id=%s", job["job_id"])
+
+
+async def _dispatch_reconciler(app: FastAPI) -> None:
+    next_upload_check = 0.0
+    while True:
+        if time.monotonic() >= next_upload_check:
+            try:
+                await _reconcile_uploads(app.state.repository, app.state.settings)
+            except Exception:
+                logger.exception("raw upload reconciliation failed")
+            next_upload_check = time.monotonic() + 5
+            try:
+                await reconcile_reprocess_results(app.state.repository, await get_temporal_client(app.state.settings))
+            except Exception:
+                logger.exception("reprocessing result reconciliation deferred")
+        try:
+            dispatch = await asyncio.to_thread(app.state.repository.claim_dispatch)
+            if dispatch:
+                await _dispatch_claimed(app.state.repository, app.state.settings, dispatch)
+                continue
+        except Exception:  # noqa: BLE001
+            logger.exception("ingestion dispatch reconciliation failed")
+        await asyncio.sleep(5)
 
 
 def _parse_csv_set(raw: str) -> set[str]:
@@ -384,10 +485,13 @@ async def submit_document(
     source = source.strip().lower()
     idempotency_key = idempotency_key.strip() if idempotency_key else None
 
+    if idempotency_key and len(idempotency_key) > 256:
+        raise HTTPException(status_code=422, detail="Idempotency-Key must contain at most 256 characters")
+
     if source not in ALLOWED_SOURCES:
         raise HTTPException(status_code=422, detail=f"Invalid source. Expected one of: {sorted(ALLOWED_SOURCES)}")
 
-    payload = await file.read()
+    payload = await file.read(settings.ingestion_max_upload_size_mb * 1024 * 1024 + 1)
     sanitized_filename = _sanitize_filename(file.filename)
     effective_mime = _validate_upload(settings, payload=payload, content_type=file.content_type, filename=sanitized_filename)
 
@@ -401,6 +505,8 @@ async def submit_document(
             idempotency_key,
         )
         if existing:
+            if existing["sha256"] != sha256:
+                raise HTTPException(status_code=409, detail="Idempotency key was already used for different content")
             INGESTION_IDEMPOTENCY_REPLAYS.inc()
             INGESTION_SUBMISSIONS.labels("idempotent_replay", source).inc()
             await _audit(
@@ -429,6 +535,11 @@ async def submit_document(
         settings.ingestion_dedupe_window_hours,
     )
     if dedupe_match and dedupe_match["status"] != "FAILED":
+        if idempotency_key:
+            try:
+                dedupe_match = await asyncio.to_thread(repository.bind_idempotency, principal.tenant_id, idempotency_key, sha256, dedupe_match["job_id"])
+            except ValueError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
         INGESTION_DEDUP_HITS.inc()
         INGESTION_SUBMISSIONS.labels("deduplicated", source).inc()
         await _audit(
@@ -458,7 +569,7 @@ async def submit_document(
     }
 
     try:
-        await asyncio.to_thread(
+        registered = await asyncio.to_thread(
             repository.create_job,
             JobCreateInput(
                 job_id=job_id,
@@ -471,6 +582,7 @@ async def submit_document(
                 size_bytes=len(payload),
                 metadata=metadata,
             ),
+            settings.ingestion_dedupe_window_hours,
         )
     except psycopg2.IntegrityError as exc:
         if idempotency_key and getattr(exc, "pgcode", "") == "23505":
@@ -480,6 +592,8 @@ async def submit_document(
                 idempotency_key,
             )
             if existing:
+                if existing["sha256"] != sha256:
+                    raise HTTPException(status_code=409, detail="Idempotency key was already used for different content") from exc
                 return DocumentSubmissionResponse(
                     job_id=existing["job_id"],
                     status=existing["status"],
@@ -492,24 +606,22 @@ async def submit_document(
                 )
         raise HTTPException(status_code=500, detail="Unable to register ingestion metadata") from exc
 
-    await _audit(
-        repository,
-        job_id=job_id,
-        tenant_id=principal.tenant_id,
-        actor_id=principal.subject,
-        event_type="job_registered",
-        event_payload={
-            "source": source,
-            "filename": sanitized_filename,
-            "content_type": effective_mime,
-            "size_bytes": len(payload),
-        },
-    )
+    if registered["job_id"] != job_id:
+        INGESTION_DEDUP_HITS.inc()
+        await _audit(repository, job_id=registered["job_id"], tenant_id=principal.tenant_id,
+                     actor_id=principal.subject, event_type="duplicate_detected", event_payload={"sha256": sha256})
+        return DocumentSubmissionResponse(
+            job_id=registered["job_id"], status=registered["status"],
+            workflow_id=registered.get("workflow_id"), workflow_run_id=registered.get("workflow_run_id"),
+            artifact_uri=registered.get("artifact_uri") or "", deduplicated=True,
+            status_url=f"/documents/{registered['job_id']}",
+        )
 
-    key = f"jobs/{job_id}/raw/{sanitized_filename}"
+    key = artifact_key(principal.tenant_id, job_id, f"raw/{sanitized_filename}")
     try:
         with INGESTION_UPLOAD_DURATION.time():
-            artifact_uri = upload_bytes(
+            artifact_uri = await asyncio.to_thread(
+                upload_bytes,
                 settings=settings,
                 bucket=settings.raw_bucket,
                 key=key,
@@ -517,7 +629,7 @@ async def submit_document(
                 content_type=effective_mime,
             )
     except Exception as exc:  # noqa: BLE001
-        await asyncio.to_thread(repository.mark_failed, job_id, "ARTIFACT_UPLOAD_FAILED", str(exc))
+        # A timed-out PUT may already be committed. Reconciliation determines its outcome.
         await _audit(
             repository,
             job_id=job_id,
@@ -530,71 +642,19 @@ async def submit_document(
         raise HTTPException(status_code=503, detail="Raw artifact persistence failed") from exc
 
     await asyncio.to_thread(repository.update_artifact, job_id, settings.raw_bucket, key, artifact_uri)
-    await _audit(
-        repository,
-        job_id=job_id,
-        tenant_id=principal.tenant_id,
-        actor_id=principal.subject,
-        event_type="artifact_persisted",
-        event_payload={"artifact_uri": artifact_uri},
-    )
-
-    workflow_id = f"idp-{principal.tenant_id}-{job_id}"
-    workflow_run_id: str | None = None
-    start_payload = {
-        "job_id": job_id,
-        "tenant_id": principal.tenant_id,
-        "source": source,
-        "raw_bucket": settings.raw_bucket,
-        "raw_key": key,
-    }
-
-    try:
-        temporal_client = await get_temporal_client(settings)
-        handle = await temporal_client.start_workflow(
-            DocumentPipelineWorkflow.run,
-            start_payload,
-            id=workflow_id,
-            task_queue=settings.temporal_task_queue,
-            execution_timeout=timedelta(minutes=settings.ingestion_workflow_timeout_minutes),
-        )
-        workflow_run_id = getattr(handle, "first_execution_run_id", None)
-        await asyncio.to_thread(repository.mark_queued, job_id, workflow_id, workflow_run_id)
-        INGESTION_QUEUE_PUBLISH.labels("success").inc()
-    except WorkflowAlreadyStartedError:
-        await asyncio.to_thread(repository.mark_queued, job_id, workflow_id, None)
-        INGESTION_QUEUE_PUBLISH.labels("already_started").inc()
-    except Exception as exc:  # noqa: BLE001
-        await asyncio.to_thread(repository.mark_failed, job_id, "QUEUE_PUBLISH_FAILED", str(exc))
-        await _audit(
-            repository,
-            job_id=job_id,
-            tenant_id=principal.tenant_id,
-            actor_id=principal.subject,
-            event_type="queue_publish_failed",
-            event_payload={"error": str(exc)},
-        )
-        INGESTION_QUEUE_PUBLISH.labels("failed").inc()
-        INGESTION_SUBMISSIONS.labels("failed", source).inc()
-        raise HTTPException(status_code=503, detail="Unable to queue workflow") from exc
-
-    await _audit(
-        repository,
-        job_id=job_id,
-        tenant_id=principal.tenant_id,
-        actor_id=principal.subject,
-        event_type="workflow_queued",
-        event_payload={"workflow_id": workflow_id, "task_queue": settings.temporal_task_queue},
-    )
+    dispatch = await asyncio.to_thread(repository.claim_dispatch, job_id)
+    if dispatch:
+        await _dispatch_claimed(repository, settings, dispatch)
+    job = await asyncio.to_thread(repository.get_job_by_id, principal.tenant_id, job_id)
 
     INGESTION_SUBMISSIONS.labels("accepted", source).inc()
     logger.info("ingestion accepted job_id=%s tenant_id=%s source=%s", job_id, principal.tenant_id, source)
 
     return DocumentSubmissionResponse(
         job_id=job_id,
-        status="QUEUED",
-        workflow_id=workflow_id,
-        workflow_run_id=workflow_run_id,
+        status=job["status"] if job else "STORED",
+        workflow_id=job.get("workflow_id") if job else None,
+        workflow_run_id=job.get("workflow_run_id") if job else None,
         artifact_uri=artifact_uri,
         idempotency_replay=False,
         deduplicated=False,
@@ -621,6 +681,13 @@ async def document_status(
             workflow = client.get_workflow_handle(workflow_id)
             description = await workflow.describe()
             workflow_status = description.status.name
+            if workflow_status == "RUNNING":
+                try:
+                    business_status = await workflow.query(DocumentPipelineWorkflow.business_status)
+                    if business_status in {"pending_human_review", "pending_delivery", "delivery_exception"}:
+                        workflow_status = business_status.upper()
+                except Exception:  # noqa: BLE001
+                    pass
         except Exception:  # noqa: BLE001
             workflow_status = None
 
@@ -645,6 +712,8 @@ async def document_audit_events(
     principal: Principal = Depends(resolve_principal),
     repository: IngestionRepository = Depends(get_repository),
 ) -> list[AuditEventResponse]:
+    if not await asyncio.to_thread(repository.get_job_by_id, principal.tenant_id, job_id):
+        raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
     bounded_limit = max(1, min(limit, 500))
     events = await asyncio.to_thread(repository.get_audit_events, principal.tenant_id, job_id, bounded_limit)
     return [
@@ -679,8 +748,19 @@ async def document_result(
     client = await get_temporal_client(settings)
     handle = client.get_workflow_handle(workflow_id)
     try:
+        description = await handle.describe()
+        if description.status.name == "RUNNING":
+            snapshot = await handle.query(DocumentPipelineWorkflow.review_snapshot)
+            if snapshot:
+                return {"job_id": job_id, "result": snapshot}
+            raise HTTPException(status_code=409, detail="Workflow result not available")
         result = await handle.result()
+    except HTTPException:
+        raise
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=409, detail="Workflow result not available") from exc
 
     return {"job_id": job_id, "result": result}
+
+
+install_reprocessing(app, get_repository, get_temporal_client, _dispatch_claimed)

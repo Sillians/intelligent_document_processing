@@ -1,5 +1,37 @@
 # Intelligent Document Processing - Local Stack
 
+## Page Execution And Quality Measurement (2026-10-03)
+New Temporal executions process OCR/layout independently per page, preserve
+successful page history during another page's retry, then validate ordered
+tenant-scoped artifacts before document aggregation. PDF native text is retained
+with separate provenance and rendering has a total decoded-pixel budget.
+Rendering itself remains a bounded document activity, not per-page checkpointing.
+The live two-page retry/restart, Label Studio approval and delivery drill passed;
+18 prior/new Temporal histories replayed successfully. This is source-mounted
+functional evidence, not production promotion or representative accuracy.
+
+Representative measurement tooling adds per-family/per-field errors,
+document-level confidence reliability diagnostics, explicit validation labels
+and label/latency coverage floors. An approved run preflights permissioned,
+independently reviewed real documents before submission. No such representative
+corpus has yet been supplied; synthetic success cannot establish production accuracy.
+See `infra/quality/README.md`, affected service READMEs and the page verification
+commands in `infra/verification/README.md` for current implementation and evidence.
+
+## Review Completion And Recoverable Intake (2026-09-30)
+
+- A review result is an intermediate snapshot while the Temporal workflow remains open. `GET /documents/{job_id}` reports `PENDING_HUMAN_REVIEW`; `GET /documents/{job_id}/result` returns the pending snapshot. After a reviewer decision, the same job reaches `delivered`, `rejected`, `review_validation_failed`, or `review_timed_out`.
+- The smoke contract accepts `delivered` or an explicitly pending review snapshot. A final rejected, invalid, or timed-out review is a smoke failure, not a successful delivery.
+- Label Studio annotations are polled by `human_review_console`; the project must expose a `decision` Choices control and a `corrected_fields_json` TextArea control. Local queue reviews can be completed with the authenticated decision API described in `human_review_console/README.md`.
+- OCR engine, capacity, and network failures no longer create synthetic text. Failed OCR is a failed workflow after bounded Temporal retries. Empty OCR output is reported as unusable input.
+- Ingestion records a database outbox item when the raw artifact becomes stored. A background reconciler retries Temporal dispatch and recovers interrupted uploads. API responses may briefly report `STORED` while dispatch is pending.
+- Non-default tenants now use `tenants/<tenant_id>/jobs/<job_id>/...` artifact keys; the default tenant retains `jobs/<job_id>/...` for compatibility. Internal processing endpoints require `X-IDP-Internal-Key` when `IDP_REQUIRE_INTERNAL_AUTH=true`.
+
+## Page-Aware Quality Gate (2026-09-30)
+
+Preprocessing now emits one artifact per PDF/TIFF/image page. OCR and layout preserve ordered page manifests and return aggregate document results. The benchmark gate checks page-count accuracy, multi-page coverage, OCR reference coverage, and document-family representation in addition to existing extraction/latency metrics. The staging acceptance policy remains `bootstrap`, not approved: no representative live benchmark has been run yet. See `data/README.md` and `infra/architecture/SERVICE_BOUNDARIES.md` before changing deployment topology.
+- Staging and production need `REVIEW_DECISION_API_KEY`, `REVIEW_DECISION_API_KEYS`, `IDP_INTERNAL_API_KEY`, `IDP_REQUIRE_INTERNAL_AUTH=true`, `REVIEW_WAIT_TIMEOUT_SECONDS`, and a workflow timeout at least one hour longer than the review wait. Update the GitHub `STAGING_ENV_FILE` secret before deploying this revision.
+
 This repository now contains a production-minded, on-premise **Intelligent Document Processing (IDP)** stack built with **Docker Compose** and a hybrid OCR pipeline:
 
 - Baseline OCR: **PaddleOCR 3.x**, with compact **Tesseract CPU OCR** for staging
@@ -321,9 +353,9 @@ INGESTION_API_KEY=dev-ingestion-key TENANT_ID=default ./scripts/run_gateway_e2e.
 5. Expected success indicators:
 - Script prints `E2E test completed successfully.`
 - `workflow_final_status` in `summary.json` is `delivered` or `pending_human_review`.
-- Temporal UI shows workflow execution in `COMPLETED` state.
+- Temporal UI shows `COMPLETED` after delivery, or `RUNNING` while review is pending.
 - If final status is `delivered`, delivery receipt fields are present.
-- If final status is `pending_human_review`, a Label Studio or local queue review task is present.
+- If the snapshot status is `pending_human_review`, a Label Studio or local queue review task is present and the workflow remains open.
 - Missing invoice required fields are only fatal by default when the workflow claims final delivery.
 - Set `STRICT_REQUIRED_FIELDS=1` to fail e2e on any missing invoice required field.
 
@@ -445,3 +477,60 @@ uv lock
 - `layout-service` will use Detectron2-backed layout analysis when runtime dependencies are available; otherwise it falls back to a safe heuristic page block.
 - `extraction-service` runs deterministic extraction first. VLM fallback is optional and disabled by default for Apple Silicon/local CPU efficiency.
 - HITL tasks are sent to Label Studio when validation gates fail.
+
+### Repeatable live review and OCR verification
+
+The local `idp-live-verification` stack runs on the `idp-staging` Docker context.
+Run `bash scripts/run_live_milestone.sh` for real Label Studio decisions through
+Temporal recovery, revalidation and delivery, five history replays, and real
+secondary OCR and outage exception checks. See `infra/verification/README.md`
+for endpoints, development credentials, operations and functional evidence.
+
+## 2026-10-01: Ordered Functional Gates
+
+The implementation order is documented in
+[`infra/architecture/IMPLEMENTATION_ORDER.md`](infra/architecture/IMPLEMENTATION_ORDER.md).
+The first pair, recoverable intake and tenant authorization, has real database,
+object-store, Temporal, and HTTP verification. Run:
+
+```bash
+bash scripts/run_ingestion_verification.sh
+```
+
+Both reports under `artifacts/ingestion-recovery/` must pass. See
+[`ingestion_service/README.md`](ingestion_service/README.md) for transactional
+outbox/audit behavior, fenced leases, integrity recovery, concurrency-safe
+deduplication, key conflicts, and deployment caveats. Operator resolution and
+reprocessing plus durable per-destination delivery are now implemented and
+live-verified in the next gate below; independent page execution and
+representative quality acceptance follow. Local fixture evidence
+is not a production promotion or representative quality benchmark.
+
+## Exception Recovery And Durable Delivery (2026-10-01)
+
+The second pair, `Fail -> resolve -> reprocess` and
+`Deliver -> acknowledge -> retry -> reconcile`, now has functional live evidence.
+Operators use separate tenant-bound credentials to create one immutable linked
+replacement job, with integrity-checked source copy and outbox crash recovery.
+Original failures remain visible; only acknowledged replacement delivery marks
+resolution complete. No review/validation gate is bypassed.
+
+Delivery now requires PostgreSQL and persists frozen envelopes, destination
+attempts, fenced leases, bounded retry and tenant-scoped dead-letter redrive.
+Successful destinations are preserved when others fail. Temporal waits for
+acknowledgement rather than treating a queued 202 response as delivered.
+Receivers must deduplicate webhook keys; remote delivery remains at-least-once.
+
+```bash
+bash scripts/run_recovery_delivery_verification.sh
+```
+
+Inspect `artifacts/recovery-delivery/report.json` (12 check groups) and exported
+histories. The isolated source-mounted gate uses actual OCR, Label Studio,
+Temporal, PostgreSQL, S3 and a signed deduplicating receiver. It verifies
+resolution-commit and send/ack/receipt crashes, redrive and restart without a
+caller. See each affected service README and `infra/verification/README.md`.
+Retirement of legacy receipts, controlled schema rollout, protected credentials,
+restore evidence and exact-image promotion remain deployment obligations.
+Page-independent execution and representative accuracy measurement follow;
+synthetic fixtures do not close those milestones.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from io import BytesIO
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import asynccontextmanager
 import logging
@@ -11,12 +12,16 @@ from typing import Any
 
 import cv2
 import numpy as np
+from PIL import Image, ImageSequence
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from shared.idp_common.config import get_settings
 from shared.idp_common.metrics import instrument_app
-from shared.idp_common.storage import download_bytes, upload_bytes
+from shared.idp_common.storage import download_bytes, upload_bytes, upload_json
+from shared.idp_common.tenant_scope import artifact_key, require_artifact_scope
+from shared.idp_common.internal_auth import install_internal_auth
+from shared.idp_common.page_contract import SCHEMA_VERSION
 
 settings = get_settings()
 logger = logging.getLogger("preprocess_worker")
@@ -34,9 +39,11 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="preprocess-worker", lifespan=lifespan)
 instrument_app(app, "preprocess-worker")
+install_internal_auth(app)
 
 
 class PreprocessRequest(BaseModel):
+    tenant_id: str = Field(default="default", min_length=1, max_length=128)
     job_id: str = Field(min_length=1, max_length=128)
     raw_bucket: str = Field(min_length=1, max_length=255)
     raw_key: str = Field(min_length=1, max_length=1024)
@@ -160,6 +167,73 @@ def _encode_png(image: np.ndarray) -> bytes:
     return encoded.tobytes()
 
 
+def _decode_pages(raw: bytes) -> list[np.ndarray]:
+    try:
+        return _decode_pages_unchecked(raw)
+    except (HTTPException, ImportError, MemoryError):
+        raise
+    except Exception as exc:
+        raise HTTPException(422, "Unsupported, corrupt, or unsafe document") from exc
+
+
+def _decode_pages_unchecked(raw: bytes) -> list[np.ndarray]:
+    limit = settings.preprocess_max_pages
+    total_pixels = 0
+    def admit(width: int, height: int) -> None:
+        nonlocal total_pixels
+        pixels = width * height
+        total_pixels += pixels
+        if pixels > 25_000_000 or total_pixels > settings.preprocess_max_total_pixels:
+            raise HTTPException(422, "Document exceeds page/total decoded pixel budget")
+    if raw.startswith(b"%PDF-"):
+        import pypdfium2 as pdfium
+
+        document = pdfium.PdfDocument(raw)
+        try:
+            count = len(document)
+            if not 1 <= count <= limit:
+                raise HTTPException(status_code=422, detail=f"PDF page count must be 1..{limit}")
+            pages = []
+            for index in range(count):
+                page = document[index]
+                try:
+                    target_scale = settings.preprocess_pdf_dpi / 72
+                    max_side = max(float(page.get_width()), float(page.get_height()))
+                    render_scale = min(target_scale, settings.preprocess_max_dimension / max_side)
+                    import math
+                    admit(math.ceil(page.get_width() * render_scale), math.ceil(page.get_height() * render_scale))
+                    bitmap = page.render(scale=render_scale)
+                    try:
+                        pages.append(cv2.cvtColor(np.asarray(bitmap.to_pil().convert("RGB")), cv2.COLOR_RGB2BGR))
+                    finally:
+                        bitmap.close()
+                finally:
+                    page.close()
+            return pages
+        finally:
+            document.close()
+    if raw.startswith((b"II*\x00", b"MM\x00*")):
+        with Image.open(BytesIO(raw)) as source:
+            count = getattr(source, "n_frames", 1)
+            if not 1 <= count <= limit:
+                raise HTTPException(status_code=422, detail=f"TIFF page count must be 1..{limit}")
+            pages = []
+            for frame in ImageSequence.Iterator(source):
+                admit(frame.width, frame.height)
+                if frame.width * frame.height > 25_000_000:
+                    raise HTTPException(status_code=422, detail="Raster page exceeds 25 megapixels")
+                pages.append(cv2.cvtColor(np.asarray(frame.convert("RGB")), cv2.COLOR_RGB2BGR))
+            return pages
+    with Image.open(BytesIO(raw)) as header:
+        admit(header.width, header.height)
+    image = cv2.imdecode(np.frombuffer(raw, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
+    if image is None:
+        raise HTTPException(status_code=422, detail="Unsupported or unreadable document")
+    if image.shape[0] * image.shape[1] > 25_000_000:
+        raise HTTPException(status_code=422, detail="Raster page exceeds 25 megapixels")
+    return [image]
+
+
 def preprocess_image(
     image: np.ndarray,
     *,
@@ -240,25 +314,31 @@ def preprocess_image(
 
 def _preprocess_sync(request: PreprocessRequest) -> dict[str, Any]:
     started = time.perf_counter()
+    if request.raw_bucket != settings.raw_bucket:
+        raise HTTPException(status_code=403, detail="Raw artifact bucket is outside intake scope")
+    require_artifact_scope(request.tenant_id, request.job_id, request.raw_key)
     raw = download_bytes(settings, request.raw_bucket, request.raw_key)
-    arr = np.frombuffer(raw, dtype=np.uint8)
-    image = cv2.imdecode(arr, cv2.IMREAD_UNCHANGED)
-
-    metadata: dict[str, Any]
-    content_type = "image/png"
-    key = f"jobs/{request.job_id}/preprocessed/page-0001.png"
-
-    if image is None:
-        out = raw
-        content_type = _guess_content_type(raw)
-        key = f"jobs/{request.job_id}/preprocessed/source.bin"
-        metadata = {
-            "pipeline": ["passthrough"],
-            "reason": "unsupported_format",
-            "content_type": content_type,
-            "size_bytes": len(raw),
-        }
-    else:
+    images = _decode_pages(raw)
+    native_text = {}
+    native_text_truncated = {}
+    if raw.startswith(b"%PDF-"):
+        import pypdfium2 as pdfium
+        with pdfium.PdfDocument(raw) as document:
+            for index in range(len(document)):
+                page = document[index]
+                try:
+                    text_page = page.get_textpage()
+                    try:
+                        character_count = text_page.count_chars()
+                        native_text[index + 1] = text_page.get_text_range(count=min(character_count, 100_000))
+                        native_text_truncated[index + 1] = character_count > 100_000
+                    finally:
+                        text_page.close()
+                finally:
+                    page.close()
+    pages: list[dict[str, Any]] = []
+    for number, image in enumerate(images, start=1):
+        key = artifact_key(request.tenant_id, request.job_id, f"preprocessed/page-{number:04d}.png")
         try:
             processed, metadata = preprocess_image(
                 image,
@@ -276,28 +356,32 @@ def _preprocess_sync(request: PreprocessRequest) -> dict[str, Any]:
                 clahe_tile_grid_size=int(getattr(settings, "preprocess_clahe_tile_grid_size", 8)),
             )
             out = _encode_png(processed)
+            output_image = processed
         except Exception as exc:  # noqa: BLE001
-            logger.exception("preprocess pipeline failed job_id=%s", request.job_id, exc_info=exc)
-            try:
-                out = _encode_png(_normalize_to_bgr(image))
-                metadata = {"pipeline": ["fallback_original_image"], "reason": _safe_reason(exc)}
-            except Exception as fallback_exc:  # noqa: BLE001
-                out = raw
-                content_type = _guess_content_type(raw)
-                key = f"jobs/{request.job_id}/preprocessed/source.bin"
-                metadata = {
-                    "pipeline": ["passthrough"],
-                    "reason": "preprocess_and_encode_failed",
-                    "error": _safe_reason(fallback_exc),
-                }
+            logger.exception("preprocess pipeline failed job_id=%s page=%s", request.job_id, number, exc_info=exc)
+            out = _encode_png(_normalize_to_bgr(image))
+            metadata = {"pipeline": ["fallback_original_image"], "reason": _safe_reason(exc)}
+            output_image = image
+        upload_bytes(settings, settings.preprocessed_bucket, key, out, "image/png")
+        native_key = None
+        if number in native_text:
+            native_key = artifact_key(request.tenant_id, request.job_id, f"preprocessed/native-{number:04d}.json")
+            upload_json(settings, settings.preprocessed_bucket, native_key,
+                {"tenant_id": request.tenant_id, "job_id": request.job_id, "page_number": number,
+                 "text": native_text[number], "provenance": "pdfium-text-layer",
+                 "coordinate_space": "pdf-points", "text_limit": 100_000,
+                 "truncated": native_text_truncated[number]})
+        pages.append({"page_number": number, "preprocessed_key": key, "width": int(output_image.shape[1]), "height": int(output_image.shape[0]), "metadata": metadata,
+                      "native_text_key": native_key, "native_text_provenance": "pdfium-text-layer" if native_key else None})
 
-    metadata["duration_ms"] = round((time.perf_counter() - started) * 1000, 3)
-    upload_bytes(settings, settings.preprocessed_bucket, key, out, content_type)
     return {
         "job_id": request.job_id,
+        "schema_version": SCHEMA_VERSION,
         "preprocessed_bucket": settings.preprocessed_bucket,
-        "preprocessed_key": key,
-        "metadata": metadata,
+        "preprocessed_key": pages[0]["preprocessed_key"],
+        "page_count": len(pages),
+        "pages": pages,
+        "metadata": {"duration_ms": round((time.perf_counter() - started) * 1000, 3), "source_content_type": _guess_content_type(raw)},
     }
 
 
@@ -313,7 +397,7 @@ async def preprocess(request: PreprocessRequest) -> dict:
 
     future = _PREPROCESS_POOL.submit(_preprocess_sync, request)
     future.add_done_callback(_release_request_slot)
-    timeout = max(1, int(getattr(settings, "preprocess_request_timeout_seconds", 60)))
+    timeout = max(1, int(settings.preprocess_request_timeout_seconds) * settings.preprocess_max_pages)
     try:
         return await asyncio.wait_for(asyncio.wrap_future(future), timeout=timeout)
     except asyncio.TimeoutError as exc:

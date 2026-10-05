@@ -8,6 +8,8 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     app_name: str = "idp-service"
+    idp_require_internal_auth: bool = False
+    idp_internal_api_key: str = ""
 
     postgres_host: str = Field(default="postgres", validation_alias=AliasChoices("POSTGRES_HOST"))
     postgres_port: int = Field(default=5432, validation_alias=AliasChoices("POSTGRES_PORT"))
@@ -123,6 +125,13 @@ class Settings(BaseSettings):
     review_high_priority_confidence_threshold: float = Field(default=0.50, ge=0.0, le=1.0)
     review_fallback_to_local_queue: bool = True
     review_persist_tasks: bool = True
+    review_decision_api_key: str = ""
+    review_decision_api_keys: str = ""
+    review_poll_interval_seconds: int = Field(default=60, ge=1)
+    review_wait_timeout_seconds: int = Field(default=604800, ge=60)
+    preprocess_max_pages: int = Field(default=25, ge=1, le=200)
+    preprocess_max_total_pixels: int = Field(default=50_000_000, ge=1, le=500_000_000)
+    preprocess_pdf_dpi: int = Field(default=150, ge=72, le=300)
     delivery_providers: str = "object_storage"
     delivery_require_approval: bool = True
     delivery_allowed_approval_statuses: str = "auto_approved,human_approved"
@@ -130,6 +139,12 @@ class Settings(BaseSettings):
     delivery_max_inflight_requests: int = Field(default=16, ge=1, le=128)
     delivery_retry_max: int = Field(default=2, ge=0, le=10)
     delivery_retry_backoff_seconds: float = Field(default=0.5, ge=0.0, le=60.0)
+    delivery_durable_max_attempts: int = Field(default=10, ge=1, le=100)
+    delivery_reconcile_interval_seconds: float = Field(default=5, ge=0.1, le=300)
+    delivery_lease_seconds: int = Field(default=120, ge=30, le=3600)
+    delivery_wait_timeout_seconds: int = Field(default=43200, ge=60)
+    delivery_poll_interval_seconds: int = Field(default=10, ge=1)
+    idp_operator_api_keys: str = ""
     delivery_payload_format_version: str = "1.0"
     delivery_redact_fields: str = ""
     delivery_webhook_url: str = ""
@@ -150,6 +165,8 @@ class Settings(BaseSettings):
     ocr_disable_mkldnn: bool = True
     ocr_language: str = "en"
     ocr_backend: str = "paddle"
+    ocr_secondary_backend: str = "none"
+    ocr_secondary_min_confidence: float = Field(default=0.80, ge=0, le=1)
     ocr_force_fallback: bool = False
     ocr_tesseract_oem: int = Field(default=1, ge=0, le=3)
     ocr_tesseract_psm: int = Field(default=3, ge=0, le=13)
@@ -157,7 +174,7 @@ class Settings(BaseSettings):
     ocr_engine_lock_timeout_seconds: float = Field(default=1.5, gt=0)
     ocr_request_timeout_seconds: int = Field(default=90, ge=1)
     ocr_max_inflight_requests: int = Field(default=1, ge=1, le=8)
-    orchestrator_enable_ocr_network_fallback: bool = True
+    orchestrator_enable_ocr_network_fallback: bool = False
 
     ingestion_max_upload_size_mb: int = Field(default=25, ge=1)
     ingestion_allowed_mime_types: str = (
@@ -165,7 +182,7 @@ class Settings(BaseSettings):
     )
     ingestion_allowed_extensions: str = "pdf,png,jpg,jpeg,tif,tiff,bmp,webp"
     ingestion_dedupe_window_hours: int = Field(default=24, ge=1)
-    ingestion_workflow_timeout_minutes: int = Field(default=30, ge=1)
+    ingestion_workflow_timeout_minutes: int = Field(default=11520, ge=1)
 
     ingestion_require_auth: bool = True
     ingestion_api_keys: str = "dev-ingestion-key:default"
